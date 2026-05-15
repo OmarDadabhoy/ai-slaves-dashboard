@@ -247,6 +247,50 @@ body {
 }
 .btn-success:hover { border-color: var(--green); opacity: 1; }
 
+/* Drain bar */
+.drain-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  flex-wrap: wrap;
+}
+
+.drain-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.btn-drain {
+  background: var(--purple);
+  color: #fff;
+}
+
+.btn-drain:hover {
+  opacity: 0.88;
+}
+
+.drain-confirm {
+  font-size: 12px;
+  color: var(--green);
+  background: var(--green-soft);
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.drain-hint {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
 /* Sections */
 .section {
   background: var(--bg-elev);
@@ -504,6 +548,24 @@ body {
 }
 
 .chip--link:hover { background: var(--accent-soft); }
+
+/* Campaign chip: color is set inline from CAMPAIGN_COLORS in App.jsx so each
+   campaign string maps deterministically to the same hue across renders. */
+.chip--campaign {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* Hint shown next to "Recently Done" header to clarify sort order. */
+.done-order-hint {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
 
 /* Card lists (SC / Follow-up) */
 .grid {

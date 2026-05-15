@@ -4,6 +4,43 @@ const API = "/api";
 
 const TICKET_STATUSES = ["queued", "in_progress", "blocked", "done"];
 
+// Campaign color palette. Deterministic by hashing the campaign string.
+// Mixes existing accent colors with 3 added muted tones (steel, gold, plum).
+const CAMPAIGN_COLORS = [
+  { name: "accent",  border: "#7c9cff", soft: "rgba(124, 156, 255, 0.18)", text: "#7c9cff" },
+  { name: "green",   border: "#5fce85", soft: "rgba(95, 206, 133, 0.18)",  text: "#5fce85" },
+  { name: "amber",   border: "#f5b86b", soft: "rgba(245, 184, 107, 0.18)", text: "#f5b86b" },
+  { name: "purple",  border: "#b18cf2", soft: "rgba(177, 140, 242, 0.18)", text: "#b18cf2" },
+  { name: "steel",   border: "#6ec6c2", soft: "rgba(110, 198, 194, 0.18)", text: "#6ec6c2" },
+  { name: "gold",    border: "#d4b14a", soft: "rgba(212, 177, 74, 0.20)",  text: "#d4b14a" },
+  { name: "plum",    border: "#c47bae", soft: "rgba(196, 123, 174, 0.18)", text: "#c47bae" },
+];
+
+function hashString(s) {
+  // Simple djb2 hash. Stable across renders + browsers.
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h) + s.charCodeAt(i);
+    h = h & 0xffffffff;
+  }
+  return Math.abs(h);
+}
+
+function campaignColor(campaign) {
+  if (!campaign) return null;
+  const idx = hashString(String(campaign)) % CAMPAIGN_COLORS.length;
+  return CAMPAIGN_COLORS[idx];
+}
+
+// "campaign:9b1a165c rest of the task text" -> { campaign: "9b1a165c", text: "rest of the task text" }
+// Falls back to plain text if no prefix.
+function parseCampaignPrefix(raw) {
+  const trimmed = (raw || "").trim();
+  const m = trimmed.match(/^campaign:(\S+)\s+(.+)$/i);
+  if (!m) return { campaign: null, text: trimmed };
+  return { campaign: m[1], text: m[2].trim() };
+}
+
 function statusLabel(s) {
   return (
     {
@@ -67,14 +104,32 @@ function Section({ title, count, action, children }) {
 function TicketCard({ ticket, onMove, onDelete, onAssignNext }) {
   const status = normalizeStatus(ticket.status);
   const body = ticket.text || ticket.title || "(untitled)";
+  const color = campaignColor(ticket.campaign);
+  // If a campaign color is set, override the left border + tint the row.
+  const style = color
+    ? { borderLeftColor: color.border, background: color.soft }
+    : undefined;
   return (
-    <div className={`ticket ticket--${status}`}>
+    <div className={`ticket ticket--${status}`} style={style}>
       <div className="ticket-head">
         <span className={`pill pill--${status}`}>{statusLabel(status)}</span>
         <span className="ticket-id">{ticket.id}</span>
       </div>
       <div className="ticket-body">{body}</div>
       <div className="ticket-meta">
+        {ticket.campaign && (
+          <span
+            className="chip chip--campaign"
+            style={{
+              color: color?.text,
+              borderColor: color?.border,
+              background: color?.soft,
+            }}
+            title="campaign tag"
+          >
+            {ticket.campaign}
+          </span>
+        )}
         {ticket.cycle != null && <span className="chip">cycle {ticket.cycle}</span>}
         {ticket.created_at && <span className="chip">{fmtDate(ticket.created_at)}</span>}
         {ticket.source && <span className="chip">{ticket.source}</span>}
@@ -167,28 +222,33 @@ export default function App() {
   const [fus, setFus] = useState([]);
   const [doneLog, setDoneLog] = useState([]);
   const [agents, setAgents] = useState([]);
+  const [pendingDrains, setPendingDrains] = useState([]);
   const [newTask, setNewTask] = useState("");
   const [apiOnline, setApiOnline] = useState(false);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("all"); // all | mine | next-drain
   const [sortBy, setSortBy] = useState("created"); // created | cycle | status
   const [view, setView] = useState("board"); // board | list
+  const [drainQueuedAt, setDrainQueuedAt] = useState(null);
+  const [copiedCmd, setCopiedCmd] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [tRes, sRes, fRes, dRes, aRes] = await Promise.all([
+      const [tRes, sRes, fRes, dRes, aRes, pdRes] = await Promise.all([
         fetch(`${API}/tasks`),
         fetch(`${API}/suggested_changes`),
         fetch(`${API}/followups`),
         fetch(`${API}/done_log`),
         fetch(`${API}/agents`),
+        fetch(`${API}/pending_drains`),
       ]);
       if (tRes.ok) setTasks(await tRes.json());
       if (sRes.ok) setScs(await sRes.json());
       if (fRes.ok) setFus(await fRes.json());
       if (dRes.ok) setDoneLog(await dRes.json());
       if (aRes.ok) setAgents(await aRes.json());
+      if (pdRes.ok) setPendingDrains(await pdRes.json());
       setApiOnline(true);
     } catch {
       setApiOnline(false);
@@ -247,13 +307,16 @@ export default function App() {
   }
 
   async function addTicket() {
-    const text = newTask.trim();
+    const raw = newTask.trim();
+    if (!raw) return;
+    const { campaign, text } = parseCampaignPrefix(raw);
     if (!text) return;
     if (!apiOnline) {
       setTasks((cur) => [
         {
           id: `t-local-${Date.now()}`,
           text,
+          campaign: campaign || undefined,
           status: "queued",
           created_at: new Date().toISOString(),
           source: "dashboard",
@@ -263,7 +326,9 @@ export default function App() {
       setNewTask("");
       return;
     }
-    await post("/tasks", { text, source: "dashboard" });
+    const body = { text, source: "dashboard" };
+    if (campaign) body.campaign = campaign;
+    await post("/tasks", body);
     setNewTask("");
   }
 
@@ -321,6 +386,35 @@ export default function App() {
     patch(`/followups/${id}`, { decision });
   }
 
+  async function requestDrain() {
+    const note = `manual trigger from dashboard at ${new Date().toISOString()}`;
+    if (!apiOnline) {
+      setPendingDrains((cur) => [
+        {
+          id: `pd-local-${Date.now()}`,
+          status: "pending",
+          requested_at: new Date().toISOString(),
+          note,
+        },
+        ...cur,
+      ]);
+      setDrainQueuedAt(Date.now());
+      return;
+    }
+    const res = await post("/pending_drains", { note, requested_at: new Date().toISOString() });
+    if (res) setDrainQueuedAt(Date.now());
+  }
+
+  async function copyDrainCommand() {
+    try {
+      await navigator.clipboard.writeText("/ai-slaves");
+      setCopiedCmd(true);
+      setTimeout(() => setCopiedCmd(false), 1800);
+    } catch {
+      // Clipboard write can fail on insecure contexts; silently ignore.
+    }
+  }
+
   // Derive ticket lanes
   const normTasks = useMemo(
     () => tasks.map((t) => ({ ...t, status: normalizeStatus(t.status) })),
@@ -357,6 +451,12 @@ export default function App() {
       const s = grouped[t.status] ? t.status : "queued";
       grouped[s].push(t);
     }
+    // Done lane always sorts oldest -> newest (t-119): things done first appear first.
+    grouped.done.sort(
+      (a, b) =>
+        new Date(a.created_at || 0).getTime() -
+        new Date(b.created_at || 0).getTime()
+    );
     return grouped;
   }, [sortedTickets]);
 
@@ -415,7 +515,7 @@ export default function App() {
       <div className="add-bar">
         <input
           type="text"
-          placeholder="New ticket. Type and hit Enter."
+          placeholder="New ticket. Prefix with 'campaign:<id> ' to tag. Hit Enter."
           value={newTask}
           onChange={(e) => setNewTask(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && addTicket()}
@@ -426,6 +526,39 @@ export default function App() {
         <button className="btn btn-ghost" onClick={loadAll} title="Force refresh (auto-refreshes every 5s)">
           Refresh
         </button>
+      </div>
+
+      <div className="drain-bar">
+        <div className="drain-bar-left">
+          <button
+            className="btn btn-drain"
+            onClick={requestDrain}
+            title="Queue a drain request. Run /ai-slaves in Claude Code to pick it up."
+          >
+            Run drain now
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={copyDrainCommand}
+            title="Copy /ai-slaves to clipboard"
+          >
+            {copiedCmd ? "Copied" : "Copy /ai-slaves"}
+          </button>
+          {pendingDrains.filter((d) => (d.status || "pending") === "pending").length > 0 && (
+            <span className="chip chip--accent">
+              Pending: {pendingDrains.filter((d) => (d.status || "pending") === "pending").length}
+            </span>
+          )}
+        </div>
+        {drainQueuedAt && Date.now() - drainQueuedAt < 8000 ? (
+          <div className="drain-confirm">
+            Drain request queued. Run <span className="kbd">/ai-slaves</span> in Claude Code to pick it up.
+          </div>
+        ) : (
+          <div className="drain-hint">
+            Queues a request file. Does not auto-fire Claude Code; the next /ai-slaves drain picks it up.
+          </div>
+        )}
       </div>
 
       <Section
@@ -672,43 +805,90 @@ export default function App() {
             )}
           </Section>
 
-          <Section title="Recently Done" count={normTasks.filter((t) => t.status === "done").length}>
+          <Section
+            title="Recently Done"
+            count={normTasks.filter((t) => t.status === "done").length + doneLog.length}
+            action={<span className="done-order-hint">oldest -&gt; newest</span>}
+          >
             {(() => {
+              // Merge done tasks + done_log entries into a single chronological stream,
+              // sorted ASC by created_at so "stuff done first" appears at the top (t-119).
               const doneTickets = normTasks
                 .filter((t) => t.status === "done")
-                .sort(
-                  (a, b) =>
-                    new Date(b.created_at || 0).getTime() -
-                    new Date(a.created_at || 0).getTime()
-                )
-                .slice(0, 12);
-              if (doneTickets.length === 0 && doneLog.length === 0) {
+                .map((t) => ({
+                  key: `task-${t.id}`,
+                  id: t.id,
+                  text: t.text || t.title,
+                  cycle: t.cycle,
+                  created_at: t.created_at,
+                  handoff: t.handoff_path || t.handoff,
+                  campaign: t.campaign,
+                  origin: "task",
+                }));
+              const doneEntries = doneLog.map((d) => ({
+                key: `log-${d.id}`,
+                id: d.id,
+                text: d.title || d.text,
+                cycle: d.cycle,
+                created_at: d.created_at,
+                handoff: d.handoff_path || d.handoff,
+                campaign: d.campaign,
+                origin: "log",
+              }));
+              const merged = [...doneTickets, ...doneEntries].sort(
+                (a, b) =>
+                  new Date(a.created_at || 0).getTime() -
+                  new Date(b.created_at || 0).getTime()
+              );
+              if (merged.length === 0) {
                 return <div className="empty">Nothing closed yet.</div>;
               }
               return (
                 <div className="done-list">
-                  {doneTickets.map((t) => (
-                    <div key={t.id} className="done-row">
-                      <span className="pill pill--done">done</span>
-                      <span className="done-text">{t.text || t.title}</span>
-                      {t.cycle != null && (
-                        <span className="chip">cycle {t.cycle}</span>
-                      )}
-                      {t.created_at && (
-                        <span className="chip">{fmtDate(t.created_at)}</span>
-                      )}
-                      {t.handoff_path && (
-                        <a
-                          className="chip chip--link"
-                          href={`file://${t.handoff_path}`}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          handoff
-                        </a>
-                      )}
-                    </div>
-                  ))}
+                  {merged.map((d) => {
+                    const color = campaignColor(d.campaign);
+                    const rowStyle = color
+                      ? { borderLeft: `3px solid ${color.border}`, background: color.soft, paddingLeft: 8 }
+                      : undefined;
+                    return (
+                      <div key={d.key} className="done-row" style={rowStyle}>
+                        <span className="pill pill--done">done</span>
+                        <span className="done-text">{d.text}</span>
+                        {d.campaign && (
+                          <span
+                            className="chip chip--campaign"
+                            style={{
+                              color: color?.text,
+                              borderColor: color?.border,
+                              background: color?.soft,
+                            }}
+                          >
+                            {d.campaign}
+                          </span>
+                        )}
+                        {d.cycle != null && (
+                          <span className="chip">cycle {d.cycle}</span>
+                        )}
+                        {d.created_at && (
+                          <span className="chip">{fmtDate(d.created_at)}</span>
+                        )}
+                        {d.handoff && (
+                          <a
+                            className="chip chip--link"
+                            href={
+                              d.handoff.startsWith("http")
+                                ? d.handoff
+                                : `file://${d.handoff}`
+                            }
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            handoff
+                          </a>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               );
             })()}

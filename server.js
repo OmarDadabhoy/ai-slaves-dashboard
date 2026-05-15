@@ -18,6 +18,7 @@ const FILES = {
   followups: path.join(DATA_DIR, "followups.json"),
   done_log: path.join(DATA_DIR, "done_log.json"),
   agents: path.join(DATA_DIR, "agents.json"),
+  pending_drains: path.join(DATA_DIR, "pending_drains.json"),
 };
 
 async function readJson(file) {
@@ -50,6 +51,7 @@ function statusDefault(name) {
   if (name === "tasks") return "queued";
   if (name === "suggested_changes") return "pending";
   if (name === "agents") return "running";
+  if (name === "pending_drains") return "pending";
   return undefined;
 }
 
@@ -112,6 +114,7 @@ collection("suggested_changes", FILES.suggested_changes, "sc");
 collection("followups", FILES.followups, "fu");
 collection("done_log", FILES.done_log, "dl");
 collection("agents", FILES.agents, "ag");
+collection("pending_drains", FILES.pending_drains, "pd");
 
 // Convenience: promote a Suggested Change into a queued ticket in one call.
 app.post("/api/suggested_changes/:id/promote", async (req, res) => {
