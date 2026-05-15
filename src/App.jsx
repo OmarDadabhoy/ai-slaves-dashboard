@@ -190,12 +190,15 @@ function TicketCard({ ticket, onMove, onDelete, onAssignNext }) {
   );
 }
 
-function Lane({ status, tickets, onMove, onDelete, onAssignNext }) {
+function Lane({ status, tickets, onMove, onDelete, onAssignNext, headAction }) {
   return (
     <div className="lane">
       <div className="lane-head">
         <span className={`pill pill--${status}`}>{statusLabel(status)}</span>
-        <span className="lane-count">{tickets.length}</span>
+        <div className="lane-head-right">
+          <span className="lane-count">{tickets.length}</span>
+          {headAction}
+        </div>
       </div>
       <div className="lane-body">
         {tickets.length === 0 ? (
@@ -230,7 +233,11 @@ export default function App() {
   const [sortBy, setSortBy] = useState("created"); // created | cycle | status
   const [view, setView] = useState("board"); // board | list
   const [drainQueuedAt, setDrainQueuedAt] = useState(null);
+  const [drainFire, setDrainFire] = useState(null); // { mode: 'fired'|'queued', pid?, ts }
+  const [drainFiring, setDrainFiring] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
+  const [clearMsg, setClearMsg] = useState(null);
+  const [clearing, setClearing] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -399,10 +406,35 @@ export default function App() {
         ...cur,
       ]);
       setDrainQueuedAt(Date.now());
+      setDrainFire({ mode: "queued", ts: Date.now() });
       return;
     }
+    setDrainFiring(true);
+    // Try the direct-fire endpoint first. If it 500s, fall back to queueing.
+    try {
+      const r = await fetch(`${API}/drain/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "/ai-slaves" }),
+      });
+      if (r.ok) {
+        const data = await r.json();
+        setDrainFire({ mode: "fired", pid: data.pid, ts: Date.now() });
+        setDrainQueuedAt(Date.now());
+        loadAll();
+        return;
+      }
+      // 500 or other non-2xx: fall through to queue fallback below.
+    } catch {
+      // network/route missing: fall through
+    } finally {
+      setDrainFiring(false);
+    }
     const res = await post("/pending_drains", { note, requested_at: new Date().toISOString() });
-    if (res) setDrainQueuedAt(Date.now());
+    if (res) {
+      setDrainQueuedAt(Date.now());
+      setDrainFire({ mode: "queued", ts: Date.now() });
+    }
   }
 
   async function copyDrainCommand() {
@@ -413,6 +445,35 @@ export default function App() {
     } catch {
       // Clipboard write can fail on insecure contexts; silently ignore.
     }
+  }
+
+  async function clearAllDone() {
+    if (!apiOnline || clearing) return;
+    const doneTaskIds = tasks
+      .filter((t) => normalizeStatus(t.status) === "done")
+      .map((t) => t.id);
+    const doneLogIds = doneLog.map((d) => d.id);
+    const total = doneTaskIds.length + doneLogIds.length;
+    if (total === 0) return;
+    if (
+      !window.confirm(
+        `Delete ${total} done entries permanently? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    setClearing(true);
+    const taskCalls = doneTaskIds.map((id) =>
+      fetch(`${API}/tasks/${id}`, { method: "DELETE" })
+    );
+    const logCalls = doneLogIds.map((id) =>
+      fetch(`${API}/done_log/${id}`, { method: "DELETE" })
+    );
+    await Promise.all([...taskCalls, ...logCalls]);
+    await loadAll();
+    setClearing(false);
+    setClearMsg(`Cleared ${total} entries`);
+    setTimeout(() => setClearMsg(null), 4000);
   }
 
   // Derive ticket lanes
@@ -533,9 +594,10 @@ export default function App() {
           <button
             className="btn btn-drain"
             onClick={requestDrain}
-            title="Queue a drain request. Run /ai-slaves in Claude Code to pick it up."
+            disabled={drainFiring}
+            title="Spawns a detached `claude` stream-json session and pipes /ai-slaves over stdin. No -p flag. Falls back to queueing if the endpoint is unavailable."
           >
-            Run drain now
+            {drainFiring ? "Firing..." : "Run drain now"}
           </button>
           <button
             className="btn btn-ghost btn-sm"
@@ -550,13 +612,19 @@ export default function App() {
             </span>
           )}
         </div>
-        {drainQueuedAt && Date.now() - drainQueuedAt < 8000 ? (
-          <div className="drain-confirm">
-            Drain request queued. Run <span className="kbd">/ai-slaves</span> in Claude Code to pick it up.
-          </div>
+        {drainFire && Date.now() - drainFire.ts < 12000 ? (
+          drainFire.mode === "fired" ? (
+            <div className="drain-confirm">
+              Drain firing... (PID {drainFire.pid}). Tail <span className="kbd">logs/drain-*.log</span> to watch output.
+            </div>
+          ) : (
+            <div className="drain-confirm">
+              Endpoint unavailable, request queued. Run <span className="kbd">/ai-slaves</span> in Claude Code to pick it up.
+            </div>
+          )
         ) : (
           <div className="drain-hint">
-            Queues a request file. Does not auto-fire Claude Code; the next /ai-slaves drain picks it up.
+            Spawns a detached <span className="kbd">claude</span> stream-json session and pipes <span className="kbd">/ai-slaves</span> over stdin (no <span className="kbd">-p</span>). Falls back to queueing if the headless endpoint fails.
           </div>
         )}
       </div>
@@ -610,6 +678,18 @@ export default function App() {
                 onMove={moveTicket}
                 onDelete={deleteTicket}
                 onAssignNext={setAssignNext}
+                headAction={
+                  s === "done" && lanes.done.length > 0 ? (
+                    <button
+                      className="btn btn-ghost btn-xs lane-clear-btn"
+                      onClick={clearAllDone}
+                      disabled={clearing || !apiOnline}
+                      title="Permanently delete every done ticket + done_log entry"
+                    >
+                      {clearing ? "..." : "clear"}
+                    </button>
+                  ) : null
+                }
               />
             ))}
           </div>
@@ -808,7 +888,28 @@ export default function App() {
           <Section
             title="Recently Done"
             count={normTasks.filter((t) => t.status === "done").length + doneLog.length}
-            action={<span className="done-order-hint">oldest -&gt; newest</span>}
+            action={
+              <div className="done-actions">
+                {clearMsg && (
+                  <span className="clear-toast">{clearMsg}</span>
+                )}
+                <span className="done-order-hint">oldest -&gt; newest</span>
+                <button
+                  className="btn btn-danger btn-sm"
+                  onClick={clearAllDone}
+                  disabled={
+                    clearing ||
+                    !apiOnline ||
+                    normTasks.filter((t) => t.status === "done").length +
+                      doneLog.length ===
+                      0
+                  }
+                  title="Permanently delete every done ticket + done_log entry"
+                >
+                  {clearing ? "Clearing..." : "Clear all done"}
+                </button>
+              </div>
+            }
           >
             {(() => {
               // Merge done tasks + done_log entries into a single chronological stream,

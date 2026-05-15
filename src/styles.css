@@ -418,6 +418,26 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.lane-head-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lane-clear-btn {
+  font-size: 10px;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  color: var(--text-faint);
+  opacity: 0.7;
+}
+
+.lane-clear-btn:hover:not(:disabled) {
+  color: var(--red);
+  border-color: var(--red);
+  opacity: 1;
+}
+
 .lane-body {
   display: flex;
   flex-direction: column;
@@ -565,6 +585,26 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-weight: 600;
+}
+
+/* Wrapper for "Recently Done" header right-side actions. */
+.done-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* Transient toast pill shown after Clear all done completes. */
+.clear-toast {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(95, 206, 133, 0.18);
+  color: #5fce85;
+  border: 1px solid rgba(95, 206, 133, 0.4);
+  letter-spacing: 0.02em;
 }
 
 /* Card lists (SC / Follow-up) */
