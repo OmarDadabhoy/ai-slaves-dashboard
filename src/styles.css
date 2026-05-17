@@ -179,9 +179,10 @@ body {
   display: flex;
   gap: 8px;
   margin-bottom: 16px;
+  align-items: flex-start;
 }
 
-.add-bar input {
+.add-bar .ticket-input {
   flex: 1;
   background: var(--bg-elev);
   border: 1px solid var(--border);
@@ -189,11 +190,17 @@ body {
   padding: 11px 14px;
   border-radius: 8px;
   font-size: 14px;
+  font-family: inherit;
+  line-height: 1.45;
+  resize: none;
+  min-height: 72px;
+  max-height: 360px;
+  overflow-y: auto;
   outline: none;
   transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
 
-.add-bar input:focus {
+.add-bar .ticket-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
@@ -271,6 +278,10 @@ body {
 .btn-drain {
   background: var(--purple);
   color: #fff;
+}
+
+.btn-drain-codex {
+  background: var(--accent);
 }
 
 .btn-drain:hover {
@@ -807,6 +818,46 @@ body {
   gap: 5px;
   margin-top: 3px;
   flex-wrap: wrap;
+}
+
+/* Recently Created HTMLs list */
+.handoff-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.handoff-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+  border-bottom: 1px dashed var(--border);
+  text-decoration: none;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.handoff-row:last-child { border-bottom: none; }
+
+.handoff-row:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.handoff-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.handoff-time {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  flex: none;
 }
 
 /* Done list */

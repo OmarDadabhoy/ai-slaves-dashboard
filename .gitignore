@@ -5,3 +5,5 @@ logs/
 .dev.pid
 .DS_Store
 .vite/
+
+data_backup/

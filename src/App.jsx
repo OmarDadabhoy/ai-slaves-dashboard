@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 
 const API = "/api";
 
@@ -84,6 +84,88 @@ function fmtTime(iso) {
   } catch {
     return "";
   }
+}
+
+// Compact "5m ago / 2h ago / 3d ago" relative time. Falls back to fmtDate for >7d.
+function fmtRelative(iso) {
+  if (!iso) return "";
+  try {
+    const diff = Date.now() - new Date(iso).getTime();
+    if (diff < 0) return "just now";
+    const min = Math.floor(diff / 60000);
+    if (min < 1) return "just now";
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    const day = Math.floor(hr / 24);
+    if (day <= 7) return `${day}d ago`;
+    return fmtDate(iso);
+  } catch {
+    return "";
+  }
+}
+
+// Strip the leading timestamp + trailing "-done.html" / "-needs_human.html" so the
+// filename reads like a sentence in the recent-HTMLs list.
+function prettyHandoffName(filename) {
+  if (!filename) return "(no name)";
+  let s = filename.replace(/\.html$/i, "");
+  // Leading "20260516T143302Z-" or "20260516T143302Z_"
+  s = s.replace(/^\d{8}T\d{6}Z[-_]/, "");
+  // Trailing status suffix
+  s = s.replace(/[-_](done|needs_human|blocked|partial)$/i, "");
+  return s.replace(/[-_]+/g, " ").trim() || filename;
+}
+
+// Tokenize a string into 4+ char lowercase words, skipping noise/stopwords.
+const FU_STOPWORDS = new Set([
+  "this","that","with","from","into","over","when","then","they","them","their",
+  "have","has","had","were","been","being","still","need","needs","know","like",
+  "next","week","weeks","month","months","year","years","time","also","more",
+  "less","most","than","what","which","where","while","there","here","just","only",
+  "should","could","would","will","wont","cant","didnt","doesnt","isnt","arent",
+  "before","after","during","without","within","still","again","done","todo",
+  "make","made","each","some","every","both","much","many","very","really",
+  "about","through","cycle","decide","decision","review","check","confirm",
+  "pending","status","note","plan","plans","task","tasks","ticket","tickets",
+]);
+function tokenize(s) {
+  if (!s) return [];
+  return String(s)
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length >= 4 && !FU_STOPWORDS.has(w));
+}
+
+// Find the best handoff URL for a followup. Strategy (b):
+//   1) Prefer done_log entries in the SAME cycle whose title shares >=2 tokens
+//      with the followup text. Break ties by token-overlap count, then recency.
+//   2) Fall back to ANY cycle if no same-cycle match.
+// Returns the handoff path/url string, or null. Pure function: safe in useMemo.
+function findMatchingHandoff(fu, doneLog) {
+  if (!fu || !doneLog || doneLog.length === 0) return null;
+  const fuText = fu.text || fu.question || fu.title || "";
+  const fuTokens = new Set(tokenize(fuText));
+  if (fuTokens.size === 0) return null;
+  const candidates = [];
+  for (const d of doneLog) {
+    const handoff = d.handoff_path || d.handoff;
+    if (!handoff) continue;
+    const title = d.title || d.text || "";
+    let overlap = 0;
+    for (const w of tokenize(title)) if (fuTokens.has(w)) overlap++;
+    if (overlap < 2) continue;
+    const sameCycle = fu.cycle != null && d.cycle === fu.cycle;
+    candidates.push({ handoff, overlap, sameCycle, created_at: d.created_at });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => {
+    if (a.sameCycle !== b.sameCycle) return a.sameCycle ? -1 : 1;
+    if (b.overlap !== a.overlap) return b.overlap - a.overlap;
+    return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+  });
+  return candidates[0].handoff;
 }
 
 function Section({ title, count, action, children }) {
@@ -226,6 +308,7 @@ export default function App() {
   const [doneLog, setDoneLog] = useState([]);
   const [agents, setAgents] = useState([]);
   const [pendingDrains, setPendingDrains] = useState([]);
+  const [recentHandoffs, setRecentHandoffs] = useState([]);
   const [newTask, setNewTask] = useState("");
   const [apiOnline, setApiOnline] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -233,22 +316,36 @@ export default function App() {
   const [sortBy, setSortBy] = useState("created"); // created | cycle | status
   const [view, setView] = useState("board"); // board | list
   const [drainQueuedAt, setDrainQueuedAt] = useState(null);
-  const [drainFire, setDrainFire] = useState(null); // { mode: 'fired'|'queued', pid?, ts }
-  const [drainFiring, setDrainFiring] = useState(false);
+  const [drainFire, setDrainFire] = useState(null); // { mode: 'fired'|'queued', runtime, pid?, ts }
+  const [drainFiring, setDrainFiring] = useState(null);
   const [copiedCmd, setCopiedCmd] = useState(false);
   const [clearMsg, setClearMsg] = useState(null);
   const [clearing, setClearing] = useState(false);
 
+  const ticketInputRef = useRef(null);
+
+  const autoResizeTextarea = () => {
+    const el = ticketInputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  };
+
+  useEffect(() => {
+    autoResizeTextarea();
+  }, [newTask]);
+
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [tRes, sRes, fRes, dRes, aRes, pdRes] = await Promise.all([
+      const [tRes, sRes, fRes, dRes, aRes, pdRes, rhRes] = await Promise.all([
         fetch(`${API}/tasks`),
         fetch(`${API}/suggested_changes`),
         fetch(`${API}/followups`),
         fetch(`${API}/done_log`),
         fetch(`${API}/agents`),
         fetch(`${API}/pending_drains`),
+        fetch(`${API}/recent_handoffs?limit=10`),
       ]);
       if (tRes.ok) setTasks(await tRes.json());
       if (sRes.ok) setScs(await sRes.json());
@@ -256,6 +353,7 @@ export default function App() {
       if (dRes.ok) setDoneLog(await dRes.json());
       if (aRes.ok) setAgents(await aRes.json());
       if (pdRes.ok) setPendingDrains(await pdRes.json());
+      if (rhRes.ok) setRecentHandoffs(await rhRes.json());
       setApiOnline(true);
     } catch {
       setApiOnline(false);
@@ -393,8 +491,9 @@ export default function App() {
     patch(`/followups/${id}`, { decision });
   }
 
-  async function requestDrain() {
-    const note = `manual trigger from dashboard at ${new Date().toISOString()}`;
+  async function requestDrain(runtime) {
+    const runtimeLabel = runtime === "codex" ? "Codex" : "Claude";
+    const note = `manual ${runtime} trigger from dashboard at ${new Date().toISOString()}`;
     if (!apiOnline) {
       setPendingDrains((cur) => [
         {
@@ -402,24 +501,25 @@ export default function App() {
           status: "pending",
           requested_at: new Date().toISOString(),
           note,
+          runtime,
         },
         ...cur,
       ]);
       setDrainQueuedAt(Date.now());
-      setDrainFire({ mode: "queued", ts: Date.now() });
+      setDrainFire({ mode: "queued", runtime, runtimeLabel, ts: Date.now() });
       return;
     }
-    setDrainFiring(true);
+    setDrainFiring(runtime);
     // Try the direct-fire endpoint first. If it 500s, fall back to queueing.
     try {
       const r = await fetch(`${API}/drain/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: "/ai-slaves" }),
+        body: JSON.stringify({ prompt: "/ai-slaves", runtime }),
       });
       if (r.ok) {
         const data = await r.json();
-        setDrainFire({ mode: "fired", pid: data.pid, ts: Date.now() });
+        setDrainFire({ mode: "fired", runtime, runtimeLabel, pid: data.pid, ts: Date.now() });
         setDrainQueuedAt(Date.now());
         loadAll();
         return;
@@ -428,12 +528,12 @@ export default function App() {
     } catch {
       // network/route missing: fall through
     } finally {
-      setDrainFiring(false);
+      setDrainFiring(null);
     }
-    const res = await post("/pending_drains", { note, requested_at: new Date().toISOString() });
+    const res = await post("/pending_drains", { note, requested_at: new Date().toISOString(), runtime });
     if (res) {
       setDrainQueuedAt(Date.now());
-      setDrainFire({ mode: "queued", ts: Date.now() });
+      setDrainFire({ mode: "queued", runtime, runtimeLabel, ts: Date.now() });
     }
   }
 
@@ -463,17 +563,31 @@ export default function App() {
       return;
     }
     setClearing(true);
-    const taskCalls = doneTaskIds.map((id) =>
-      fetch(`${API}/tasks/${id}`, { method: "DELETE" })
-    );
-    const logCalls = doneLogIds.map((id) =>
-      fetch(`${API}/done_log/${id}`, { method: "DELETE" })
-    );
-    await Promise.all([...taskCalls, ...logCalls]);
-    await loadAll();
-    setClearing(false);
-    setClearMsg(`Cleared ${total} entries`);
-    setTimeout(() => setClearMsg(null), 4000);
+    // Two bulk-delete requests (one per collection) instead of N parallel
+    // DELETEs. Server does one read+write per collection so we can't race
+    // the JSON file or get lost updates.
+    try {
+      await Promise.all([
+        fetch(`${API}/tasks/_bulk_delete`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: doneTaskIds }),
+        }),
+        fetch(`${API}/done_log/_bulk_delete`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: doneLogIds }),
+        }),
+      ]);
+      await loadAll();
+      setClearMsg(`Cleared ${total} entries`);
+    } catch (err) {
+      console.error("clearAllDone failed", err);
+      setClearMsg(`Clear failed: ${err.message || err}`);
+    } finally {
+      setClearing(false);
+      setTimeout(() => setClearMsg(null), 4000);
+    }
   }
 
   // Derive ticket lanes
@@ -533,8 +647,19 @@ export default function App() {
 
   const pendingScs = scs.filter((s) => (s.status || "pending") === "pending");
   const decidedScs = scs.filter((s) => s.status === "promoted" || s.status === "dropped");
-  const openFus = fus.filter((f) => !f.decision);
-  const decidedFus = fus.filter((f) => f.decision);
+  // Decorate each followup with a best-effort handoff link inferred from done_log
+  // (strategy b in the implementation plan: text-token overlap, same-cycle preferred).
+  // Recompute when followups or done_log change so live drain writes show up.
+  const fusWithHandoff = useMemo(() => {
+    if (!fus || fus.length === 0) return fus;
+    const recent = doneLog.slice(0, 50);
+    return fus.map((f) => ({
+      ...f,
+      _matched_handoff: f.handoff_path || f.handoff || findMatchingHandoff(f, recent),
+    }));
+  }, [fus, doneLog]);
+  const openFus = fusWithHandoff.filter((f) => !f.decision);
+  const decidedFus = fusWithHandoff.filter((f) => f.decision);
 
   const runningAgents = agents.filter((a) => (a.status || "running") === "running");
   const recentAgents = agents
@@ -574,12 +699,19 @@ export default function App() {
       </header>
 
       <div className="add-bar">
-        <input
-          type="text"
-          placeholder="New ticket. Prefix with 'campaign:<id> ' to tag. Hit Enter."
+        <textarea
+          ref={ticketInputRef}
+          className="ticket-input"
+          placeholder="New ticket. Prefix with 'campaign:<id> ' to tag. Enter to submit, Shift+Enter for newline."
           value={newTask}
           onChange={(e) => setNewTask(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && addTicket()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              addTicket();
+            }
+          }}
+          rows={3}
         />
         <button className="btn" onClick={addTicket} disabled={!newTask.trim()}>
           Add ticket
@@ -593,11 +725,19 @@ export default function App() {
         <div className="drain-bar-left">
           <button
             className="btn btn-drain"
-            onClick={requestDrain}
-            disabled={drainFiring}
+            onClick={() => requestDrain("claude")}
+            disabled={!!drainFiring}
             title="Spawns a detached `claude` stream-json session and pipes /ai-slaves over stdin. No -p flag. Falls back to queueing if the endpoint is unavailable."
           >
-            {drainFiring ? "Firing..." : "Run drain now"}
+            {drainFiring === "claude" ? "Firing Claude..." : "Run drain now for Claude"}
+          </button>
+          <button
+            className="btn btn-drain btn-drain-codex"
+            onClick={() => requestDrain("codex")}
+            disabled={!!drainFiring}
+            title="Spawns a detached `codex exec` session with /ai-slaves. Falls back to queueing if the endpoint is unavailable."
+          >
+            {drainFiring === "codex" ? "Firing Codex..." : "Run drain now for Codex"}
           </button>
           <button
             className="btn btn-ghost btn-sm"
@@ -615,16 +755,16 @@ export default function App() {
         {drainFire && Date.now() - drainFire.ts < 12000 ? (
           drainFire.mode === "fired" ? (
             <div className="drain-confirm">
-              Drain firing... (PID {drainFire.pid}). Tail <span className="kbd">logs/drain-*.log</span> to watch output.
+              {drainFire.runtimeLabel} drain firing... (PID {drainFire.pid}). Tail <span className="kbd">logs/drain-*.log</span> to watch output.
             </div>
           ) : (
             <div className="drain-confirm">
-              Endpoint unavailable, request queued. Run <span className="kbd">/ai-slaves</span> in Claude Code to pick it up.
+              Endpoint unavailable, {drainFire.runtimeLabel} request queued. Run <span className="kbd">/ai-slaves</span> in {drainFire.runtimeLabel} to pick it up.
             </div>
           )
         ) : (
           <div className="drain-hint">
-            Spawns a detached <span className="kbd">claude</span> stream-json session and pipes <span className="kbd">/ai-slaves</span> over stdin (no <span className="kbd">-p</span>). Falls back to queueing if the headless endpoint fails.
+            Spawns a detached Claude or Codex session with <span className="kbd">/ai-slaves</span>. Falls back to queueing if the headless endpoint fails.
           </div>
         )}
       </div>
@@ -794,12 +934,29 @@ export default function App() {
                         </li>
                       ))}
                     </ul>
-                    {f.cycle != null && (
-                      <div className="card-meta">
+                    <div className="card-meta">
+                      {f.cycle != null && (
                         <span className="chip">cycle {f.cycle}</span>
-                        <span className="chip">{f.id}</span>
-                      </div>
-                    )}
+                      )}
+                      <span className="chip">{f.id}</span>
+                      {f._matched_handoff && (
+                        <a
+                          className="chip chip--link"
+                          href={
+                            f._matched_handoff.startsWith("http")
+                              ? f._matched_handoff
+                              : `/reports/${encodeURIComponent(
+                                  f._matched_handoff.split("/").pop()
+                                )}`
+                          }
+                          target="_blank"
+                          rel="noreferrer"
+                          title={f._matched_handoff}
+                        >
+                          view handoff
+                        </a>
+                      )}
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -814,6 +971,23 @@ export default function App() {
                       <div className="card-meta">
                         <span className="chip chip--accent">{f.decision}</span>
                         {f.cycle != null && <span className="chip">cycle {f.cycle}</span>}
+                        {f._matched_handoff && (
+                          <a
+                            className="chip chip--link"
+                            href={
+                              f._matched_handoff.startsWith("http")
+                                ? f._matched_handoff
+                                : `/reports/${encodeURIComponent(
+                                    f._matched_handoff.split("/").pop()
+                                  )}`
+                            }
+                            target="_blank"
+                            rel="noreferrer"
+                            title={f._matched_handoff}
+                          >
+                            view handoff
+                          </a>
+                        )}
                       </div>
                     </li>
                   ))}
@@ -824,6 +998,36 @@ export default function App() {
         </div>
 
         <div className="col">
+          <Section
+            title="Recently Created HTMLs"
+            count={recentHandoffs.length}
+            action={
+              <span className="done-order-hint">newest -&gt; oldest</span>
+            }
+          >
+            {recentHandoffs.length === 0 ? (
+              <div className="empty">No handoff HTMLs yet.</div>
+            ) : (
+              <div className="handoff-list">
+                {recentHandoffs.map((h) => (
+                  <a
+                    key={h.filename}
+                    className="handoff-row"
+                    href={h.relative_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={h.filename}
+                  >
+                    <span className="handoff-name">
+                      {prettyHandoffName(h.filename)}
+                    </span>
+                    <span className="handoff-time">{fmtRelative(h.mtime_iso)}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+          </Section>
+
           <Section title="Agents" count={runningAgents.length}>
             {agents.length === 0 ? (
               <div className="empty">
