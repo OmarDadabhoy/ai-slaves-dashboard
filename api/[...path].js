@@ -6,6 +6,7 @@
 // DASHBOARD_TOKEN env var. See _lib/auth.js.
 
 import { checkToken } from "./_lib/auth.js";
+import { clearRequestCache } from "./_lib/store.js";
 import {
   handleCollectionGet,
   handleCollectionPost,
@@ -45,6 +46,13 @@ function parseSegments(query) {
 }
 
 export default async function handler(req, res) {
+  // CRITICAL: the in-process requestCache in store.js is module-level, so it
+  // survives across warm serverless invocations and can return stale data
+  // from previous requests. Clear it at the start of every request so each
+  // invocation starts with a clean cache (the cache is then only used to
+  // dedupe reads within this single request).
+  clearRequestCache();
+
   // CORS: allow same-origin and the production domain. Vite dev proxies to
   // server.js so this only fires on Vercel; same-origin is the default.
   res.setHeader("Access-Control-Allow-Origin", "*");

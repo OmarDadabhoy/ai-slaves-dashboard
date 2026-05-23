@@ -102,9 +102,50 @@ export function clearRequestCache() {
   requestCache.clear();
 }
 
-// Atomic mutate-and-save helper. Reads the latest, lets the mutator return
-// either { items, result } or { skipWrite, result }.
+// Atomic mutate-and-save helper with optimistic concurrency control.
+//
+// Vercel Blob has no native compare-and-set, so we approximate it: capture
+// the blob's `uploadedAt` before the read, do the mutation, re-check
+// `uploadedAt` before the write, and if it changed (another writer landed
+// in between), bust the cache and retry with the new state.
+//
+// This catches the common race: two writers each read the same snapshot,
+// modify it locally, and write back. Without this guard the second writer
+// silently overwrites the first writer's change.
+const MUTATE_RETRIES = 6;
+async function blobHeadUploadedAt(name) {
+  const key = blobKey(name);
+  try {
+    const r = await list({ prefix: key, limit: 1, token: TOKEN });
+    if (!r.blobs || r.blobs.length === 0) return null;
+    return r.blobs[0].uploadedAt || r.blobs[0].url || null;
+  } catch { return null; }
+}
+
 export async function mutateCollection(name, mutator) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < MUTATE_RETRIES; attempt++) {
+    const beforeStamp = await blobHeadUploadedAt(name);
+    requestCache.delete(cacheKey(name)); // force fresh read from origin
+    const items = await readCollection(name);
+    const mutation = await mutator(items);
+    if (mutation.skipWrite) return mutation.result;
+    // Re-check the blob's stamp right before writing. If it moved, someone
+    // else wrote between our read and our write; retry with fresh state.
+    const recheckStamp = await blobHeadUploadedAt(name);
+    if (beforeStamp !== null && recheckStamp !== null && recheckStamp !== beforeStamp) {
+      requestCache.delete(cacheKey(name));
+      // Short backoff with jitter so concurrent writers don't lock-step.
+      await new Promise((r) => setTimeout(r, 30 + Math.random() * 70));
+      lastErr = new Error(`stale read on ${name} (attempt ${attempt + 1})`);
+      continue;
+    }
+    await writeCollection(name, mutation.items || items);
+    return mutation.result;
+  }
+  // Last-resort: write anyway so the caller doesn't hang. Logged so we can
+  // see contention. In practice this almost never fires.
+  console.error(`[store] mutateCollection ${name} exceeded retries: ${lastErr?.message}`);
   const items = await readCollection(name);
   const mutation = await mutator(items);
   if (mutation.skipWrite) return mutation.result;
