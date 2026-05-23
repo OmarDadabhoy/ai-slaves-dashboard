@@ -45,7 +45,12 @@ async function fetchCollectionFromBlob(name) {
     // `list` with prefix scoped to this collection's key; cheaper than head().
     const r = await list({ prefix: key, limit: 1, token: TOKEN });
     if (!r.blobs || r.blobs.length === 0) return [];
-    const url = r.blobs[0].url;
+    // Vercel Blob public URLs are CDN-cached at the edge. Even with
+    // cacheControlMaxAge:0 on write, edge nodes can serve stale snapshots
+    // for a brief window. Append a unique timestamp to bypass edge cache
+    // and always read the origin's current bytes. (Fixes the "tickets
+    // appear/disappear in the UI" flicker.)
+    const url = r.blobs[0].url + (r.blobs[0].url.includes("?") ? "&" : "?") + `ts=${Date.now()}`;
     const fetched = await fetch(url, { cache: "no-store" });
     if (!fetched.ok) return [];
     const raw = await fetched.text();
