@@ -676,7 +676,17 @@ function DashboardApp({ token, isMobile, onSignOut }) {
       try { return await r.json(); } catch { return null; }
     };
     const tJ = await okOrNull(tRes);
-    if (tJ !== null) setTasks(tJ);
+    if (tJ !== null) {
+      // Preserve any in-flight optimistic rows (added by addTicket before
+      // the POST has resolved). Without this, a background loadAll firing
+      // during the optimistic window wipes the row, then the POST swap
+      // can't find the temp id and the ticket disappears for one cycle.
+      setTasks((cur) => {
+        const serverIds = new Set(tJ.map((t) => t.id));
+        const pending = cur.filter((t) => t._optimistic && !serverIds.has(t.id));
+        return pending.length ? [...pending, ...tJ] : tJ;
+      });
+    }
     const sJ = await okOrNull(sRes);
     if (sJ !== null) setScs(sJ);
     const fJ = await okOrNull(fRes);
@@ -792,10 +802,35 @@ function DashboardApp({ token, isMobile, onSignOut }) {
       setNewTask("");
       return;
     }
+    // Optimistic: show the new ticket immediately with a temporary id so the
+    // user sees instant feedback. When the POST returns we swap the temp id
+    // for the server-assigned one. If the POST fails we roll back.
+    const tempId = `t-tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const optimistic = {
+      id: tempId,
+      text,
+      campaign: campaign || undefined,
+      status: "queued",
+      created_at: new Date().toISOString(),
+      source: "dashboard",
+      _optimistic: true,
+    };
+    setTasks((cur) => [optimistic, ...cur]);
+    setNewTask("");
     const body = { text, source: "dashboard" };
     if (campaign) body.campaign = campaign;
-    await post("/tasks", body);
-    setNewTask("");
+    const created = await post("/tasks", body);
+    setTasks((cur) => {
+      if (!created || !created.id) {
+        // POST failed: drop the optimistic row.
+        return cur.filter((t) => t.id !== tempId);
+      }
+      // Replace temp row with the server's row. If a concurrent loadAll
+      // already inserted the real row, drop the temp without duplicating.
+      const haveReal = cur.some((t) => t.id === created.id);
+      if (haveReal) return cur.filter((t) => t.id !== tempId);
+      return cur.map((t) => (t.id === tempId ? { ...created } : t));
+    });
   }
 
   function moveTicket(id, status) {
