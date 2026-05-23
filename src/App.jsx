@@ -560,16 +560,51 @@ export default function App() {
   return <DashboardApp token={token} isMobile={isMobile} onSignOut={() => { setStoredToken(""); setToken(""); setAuthRequired(true); }} />;
 }
 
+// Tiny write-through cache so the dashboard stays visible across refreshes
+// and network blips. On mount we hydrate from the last-known snapshot
+// (instant first paint, no blank), then loadAll fetches fresh data in
+// the background and overwrites. Every state setter also persists, so
+// reloads never see an empty UI.
+const STATE_CACHE_KEY_PREFIX = "ai-slaves:state:v1:";
+function cacheLoad(key, fallback) {
+  if (typeof window === "undefined" || !window.localStorage) return fallback;
+  try {
+    const raw = window.localStorage.getItem(STATE_CACHE_KEY_PREFIX + key);
+    if (raw == null) return fallback;
+    const parsed = JSON.parse(raw);
+    return parsed === undefined ? fallback : parsed;
+  } catch { return fallback; }
+}
+function cacheSave(key, val) {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(STATE_CACHE_KEY_PREFIX + key, JSON.stringify(val));
+  } catch {} // quota / disabled / etc
+}
+
 function DashboardApp({ token, isMobile, onSignOut }) {
-  const [tasks, setTasks] = useState([]);
-  const [scs, setScs] = useState([]);
-  const [fus, setFus] = useState([]);
-  const [doneLog, setDoneLog] = useState([]);
-  const [agents, setAgents] = useState([]);
-  const [pendingDrains, setPendingDrains] = useState([]);
-  const [recentHandoffs, setRecentHandoffs] = useState([]);
-  const [schedulerInfo, setSchedulerInfo] = useState(null);
-  const [scheduled, setScheduled] = useState([]);
+  const [tasks, setTasks] = useState(() => cacheLoad("tasks", []));
+  const [scs, setScs] = useState(() => cacheLoad("scs", []));
+  const [fus, setFus] = useState(() => cacheLoad("fus", []));
+  const [doneLog, setDoneLog] = useState(() => cacheLoad("doneLog", []));
+  const [agents, setAgents] = useState(() => cacheLoad("agents", []));
+  const [pendingDrains, setPendingDrains] = useState(() => cacheLoad("pendingDrains", []));
+  const [recentHandoffs, setRecentHandoffs] = useState(() => cacheLoad("recentHandoffs", []));
+  const [schedulerInfo, setSchedulerInfo] = useState(() => cacheLoad("schedulerInfo", null));
+  const [scheduled, setScheduled] = useState(() => cacheLoad("scheduled", []));
+
+  // Persist every state change to localStorage so refresh / network blip
+  // never blanks the dashboard. Hydration above gives instant first paint
+  // from the last-known snapshot; these effects keep it current after that.
+  useEffect(() => { cacheSave("tasks", tasks); }, [tasks]);
+  useEffect(() => { cacheSave("scs", scs); }, [scs]);
+  useEffect(() => { cacheSave("fus", fus); }, [fus]);
+  useEffect(() => { cacheSave("doneLog", doneLog); }, [doneLog]);
+  useEffect(() => { cacheSave("agents", agents); }, [agents]);
+  useEffect(() => { cacheSave("pendingDrains", pendingDrains); }, [pendingDrains]);
+  useEffect(() => { cacheSave("recentHandoffs", recentHandoffs); }, [recentHandoffs]);
+  useEffect(() => { cacheSave("schedulerInfo", schedulerInfo); }, [schedulerInfo]);
+  useEffect(() => { cacheSave("scheduled", scheduled); }, [scheduled]);
   const [newTask, setNewTask] = useState("");
   const [apiOnline, setApiOnline] = useState(false);
   const [loading, setLoading] = useState(true);
