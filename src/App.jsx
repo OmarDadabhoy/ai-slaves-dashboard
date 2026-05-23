@@ -582,6 +582,15 @@ function cacheSave(key, val) {
   } catch {} // quota / disabled / etc
 }
 
+// Cheap deep-equal: if the JSON encoding matches, the rendered output will
+// match too. Used to short-circuit setState when the 5s poll returns
+// identical data, preventing the kanban from re-rendering every card and
+// causing the "micro flicker" Omar still sees after the data-race fixes.
+function sameJson(a, b) {
+  if (a === b) return true;
+  try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+}
+
 function DashboardApp({ token, isMobile, onSignOut }) {
   const [tasks, setTasks] = useState(() => cacheLoad("tasks", []));
   const [scs, setScs] = useState(() => cacheLoad("scs", []));
@@ -681,28 +690,31 @@ function DashboardApp({ token, isMobile, onSignOut }) {
       // the POST has resolved). Without this, a background loadAll firing
       // during the optimistic window wipes the row, then the POST swap
       // can't find the temp id and the ticket disappears for one cycle.
+      // ALSO: short-circuit if the new value equals current state so React
+      // doesn't re-render every card on each 5s poll (kills micro-flicker).
       setTasks((cur) => {
         const serverIds = new Set(tJ.map((t) => t.id));
         const pending = cur.filter((t) => t._optimistic && !serverIds.has(t.id));
-        return pending.length ? [...pending, ...tJ] : tJ;
+        const next = pending.length ? [...pending, ...tJ] : tJ;
+        return sameJson(cur, next) ? cur : next;
       });
     }
     const sJ = await okOrNull(sRes);
-    if (sJ !== null) setScs(sJ);
+    if (sJ !== null) setScs((cur) => sameJson(cur, sJ) ? cur : sJ);
     const fJ = await okOrNull(fRes);
-    if (fJ !== null) setFus(fJ);
+    if (fJ !== null) setFus((cur) => sameJson(cur, fJ) ? cur : fJ);
     const dJ = await okOrNull(dRes);
-    if (dJ !== null) setDoneLog(dJ);
+    if (dJ !== null) setDoneLog((cur) => sameJson(cur, dJ) ? cur : dJ);
     const aJ = await okOrNull(aRes);
-    if (aJ !== null) setAgents(aJ);
+    if (aJ !== null) setAgents((cur) => sameJson(cur, aJ) ? cur : aJ);
     const pdJ = await okOrNull(pdRes);
-    if (pdJ !== null) setPendingDrains(pdJ);
+    if (pdJ !== null) setPendingDrains((cur) => sameJson(cur, pdJ) ? cur : pdJ);
     const rhJ = await okOrNull(rhRes);
-    if (rhJ !== null) setRecentHandoffs(rhJ);
+    if (rhJ !== null) setRecentHandoffs((cur) => sameJson(cur, rhJ) ? cur : rhJ);
     const schedJ = await okOrNull(schedRes);
-    if (schedJ !== null) setSchedulerInfo(schedJ);
+    if (schedJ !== null) setSchedulerInfo((cur) => sameJson(cur, schedJ) ? cur : schedJ);
     const schdJ = await okOrNull(schdRes);
-    if (schdJ !== null) setScheduled(schdJ);
+    if (schdJ !== null) setScheduled((cur) => sameJson(cur, schdJ) ? cur : schdJ);
 
     // Health: api is online if at least one of the core endpoints (tasks)
     // resolved. Otherwise show read-only banner BUT keep existing state.
