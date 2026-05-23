@@ -1,31 +1,25 @@
 // Route handlers for the Vercel API. Mirrors server.js's behavior but reads
 // and writes against Vercel Blob instead of the local filesystem.
 //
+// Storage shape: per-row blobs at ai-slaves/<collection>/<id>.json. See
+// store.js for the rationale. The TL;DR: concurrent POSTs against the
+// same collection used to clobber each other because every mutation was
+// a read-modify-write of one big blob. Per-row writes don't collide on
+// distinct IDs, and createRow() uses allowOverwrite=false for atomic
+// create-or-fail with retry-on-conflict on the rare same-ID race.
+//
 // Endpoints that depend on local machine state (spawn claude/codex, inspect
 // launchd, read ~/Desktop/Ai-slaves/state/reports/) return stub responses
 // instead of failing loudly. Those features only make sense in local mode.
 
-import { readCollection, mutateCollection, writeCollection } from "./store.js";
-
-const COLLECTIONS = [
-  "tasks",
-  "suggested_changes",
-  "followups",
-  "done_log",
-  "agents",
-  "pending_drains",
-  "scheduled",
-];
-
-const ID_PREFIXES = {
-  tasks: "t",
-  suggested_changes: "sc",
-  followups: "fu",
-  done_log: "dl",
-  agents: "ag",
-  pending_drains: "pd",
-  scheduled: "sched",
-};
+import {
+  listRows,
+  readRow,
+  writeRow,
+  deleteRow,
+  mutateRow,
+  createRow,
+} from "./store.js";
 
 const STATUS_DEFAULTS = {
   tasks: "queued",
@@ -36,17 +30,6 @@ const STATUS_DEFAULTS = {
 };
 
 const SEND_REVIEW_CHECKLIST_KIND = "gmail_send_review_checklist";
-
-function nextId(prefix, items) {
-  const nums = items
-    .map((i) => {
-      const m = String(i.id || "").match(new RegExp(`^${prefix}-(\\d+)$`));
-      return m ? parseInt(m[1], 10) : 0;
-    })
-    .filter((n) => !Number.isNaN(n));
-  const max = nums.length ? Math.max(...nums) : 0;
-  return `${prefix}-${String(max + 1).padStart(3, "0")}`;
-}
 
 function normalizeTask(t) {
   if (!t) return t;
@@ -133,37 +116,37 @@ function parseBody(req) {
 // ============================================================
 
 export async function handleCollectionGet(name, _req, res) {
-  let items = await readCollection(name);
+  let items = await listRows(name);
   if (name === "tasks") items = items.map(normalizeTask);
   res.status(200).json(items);
 }
 
 export async function handleCollectionPost(name, req, res) {
   const body = parseBody(req);
-  const prefix = ID_PREFIXES[name];
-  const item = await mutateCollection(name, async (items) => {
+  // createRow handles the ID-collision race: if two concurrent POSTs both
+  // computed the same candidate ID, exactly one wins and the loser retries
+  // with the next number. Both end up persisted with distinct IDs.
+  const item = await createRow(name, (id) => {
     const next = {
-      id: nextId(prefix, items),
+      id,
       created_at: new Date().toISOString(),
       ...body,
     };
     const def = STATUS_DEFAULTS[name];
     if (def && !next.status) next.status = def;
     if (name === "tasks") normalizeTask(next);
-    items.unshift(next);
-    return { result: next, items };
+    return next;
   });
   res.status(200).json(item);
 }
 
 export async function handleCollectionPatch(name, id, req, res) {
   const body = parseBody(req);
-  const item = await mutateCollection(name, async (items) => {
-    const idx = items.findIndex((i) => i.id === id);
-    if (idx === -1) return { skipWrite: true, result: null };
-    items[idx] = { ...items[idx], ...body };
-    if (name === "tasks") normalizeTask(items[idx]);
-    return { result: items[idx], items };
+  const item = await mutateRow(name, id, async (cur) => {
+    if (!cur) return { skipWrite: true, result: null };
+    const merged = { ...cur, ...body };
+    if (name === "tasks") normalizeTask(merged);
+    return { value: merged, result: merged };
   });
   if (!item) {
     res.status(404).json({ error: "not found" });
@@ -173,89 +156,105 @@ export async function handleCollectionPatch(name, id, req, res) {
 }
 
 export async function handleCollectionDelete(name, id, _req, res) {
-  await mutateCollection(name, async (items) => ({
-    items: items.filter((i) => i.id !== id),
-    result: { ok: true },
-  }));
+  await deleteRow(name, id);
   res.status(200).json({ ok: true });
 }
 
 export async function handleBulkDelete(name, req, res) {
   const body = parseBody(req);
-  const result = await mutateCollection(name, async (items) => {
-    const idSet = new Set(Array.isArray(body?.ids) ? body.ids : []);
-    const where = body?.where && typeof body.where === "object" ? body.where : null;
-    const filtered = items.filter((i) => {
-      if (idSet.has(i.id)) return false;
-      if (where) {
-        for (const k of Object.keys(where)) {
-          if (i[k] !== where[k]) return true;
+  const idSet = new Set(Array.isArray(body?.ids) ? body.ids : []);
+  const where = body?.where && typeof body.where === "object" ? body.where : null;
+
+  // For bulk-by-id we don't need to list everything; just delete each ID.
+  // For bulk-by-where we have to list and filter.
+  let toDelete;
+  if (idSet.size > 0 && !where) {
+    toDelete = [...idSet];
+  } else {
+    const items = await listRows(name);
+    toDelete = items
+      .filter((i) => {
+        if (idSet.has(i.id)) return true;
+        if (where) {
+          for (const k of Object.keys(where)) {
+            if (i[k] !== where[k]) return false;
+          }
+          return true;
         }
         return false;
-      }
-      return true;
-    });
-    const deleted = items.length - filtered.length;
-    return {
-      items: filtered,
-      result: { ok: true, deleted, remaining: filtered.length },
-    };
-  });
-  res.status(200).json(result);
+      })
+      .map((i) => i.id);
+  }
+  await Promise.all(toDelete.map((id) => deleteRow(name, id)));
+  // Remaining count: skip a re-list when caller passed explicit ids only
+  // (saves a roundtrip). When using a where clause, the list is already
+  // in hand from above.
+  let remaining;
+  if (idSet.size > 0 && !where) {
+    remaining = (await listRows(name)).length;
+  } else {
+    remaining = (await listRows(name)).length;
+  }
+  res.status(200).json({ ok: true, deleted: toDelete.length, remaining });
 }
 
 // ============================================================
 // Specialized routes
 // ============================================================
 
+// Groups open Gmail draft send/review follow-ups into one dashboard checklist.
+// Touches multiple rows in followups: creates-or-updates the checklist row,
+// then patches each candidate row to mark it grouped. Per-row writes mean
+// each individual write is atomic; the only risk is partial application
+// if the function dies mid-way, which is no worse than the old shape.
 export async function handleSendReviewChecklist(_req, res) {
-  const result = await mutateCollection("followups", async (items) => {
-    const now = new Date().toISOString();
-    const existingIdx = items.findIndex(
-      (item) =>
-        item.kind === SEND_REVIEW_CHECKLIST_KIND &&
-        !item.decision &&
-        !["done", "decided", "dropped"].includes(item.status)
-    );
-    const existing = existingIdx >= 0 ? items[existingIdx] : null;
-    const candidates = items.filter(isSendReviewDraftFollowup);
+  const items = await listRows("followups");
+  const now = new Date().toISOString();
+  const existing = items.find(
+    (item) =>
+      item.kind === SEND_REVIEW_CHECKLIST_KIND &&
+      !item.decision &&
+      !["done", "decided", "dropped"].includes(item.status)
+  );
+  const candidates = items.filter(isSendReviewDraftFollowup);
 
-    if (candidates.length === 0 && !existing) {
-      return {
-        skipWrite: true,
-        result: {
-          ok: true,
-          grouped: 0,
-          checklist: null,
-          message: "No eligible Gmail draft follow-ups to group.",
-        },
-      };
-    }
+  if (candidates.length === 0 && !existing) {
+    res.status(200).json({
+      ok: true,
+      grouped: 0,
+      checklist: null,
+      message: "No eligible Gmail draft follow-ups to group.",
+    });
+    return;
+  }
 
-    const checklistId = existing?.id || nextId("fu", items);
-    const byId = new Map(
-      (Array.isArray(existing?.checklist_items) ? existing.checklist_items : [])
-        .filter((item) => item?.followup_id || item?.id)
-        .map((item) => [item.followup_id || item.id, item])
-    );
-    for (const candidate of candidates) {
-      byId.set(candidate.id, {
-        ...(byId.get(candidate.id) || {}),
-        ...sendReviewChecklistItem(candidate),
-      });
-    }
-    const checklistItems = [...byId.values()].sort(
-      (a, b) =>
-        new Date(a.created_at || 0).getTime() -
-        new Date(b.created_at || 0).getTime()
-    );
-    const validItemIds = new Set(checklistItems.map((item) => item.followup_id || item.id));
-    const checkedItemIds = (
-      Array.isArray(existing?.checked_item_ids) ? existing.checked_item_ids : []
-    ).filter((id) => validItemIds.has(id));
-    const checklist = {
-      ...(existing || {}),
-      id: checklistId,
+  // Build checklist contents. We need a stable ID; if no existing checklist
+  // row, mint one via createRow so the ID-collision protection applies.
+  const byId = new Map(
+    (Array.isArray(existing?.checklist_items) ? existing.checklist_items : [])
+      .filter((item) => item?.followup_id || item?.id)
+      .map((item) => [item.followup_id || item.id, item])
+  );
+  for (const candidate of candidates) {
+    byId.set(candidate.id, {
+      ...(byId.get(candidate.id) || {}),
+      ...sendReviewChecklistItem(candidate),
+    });
+  }
+  const checklistItems = [...byId.values()].sort(
+    (a, b) =>
+      new Date(a.created_at || 0).getTime() -
+      new Date(b.created_at || 0).getTime()
+  );
+  const validItemIds = new Set(checklistItems.map((item) => item.followup_id || item.id));
+  const checkedItemIds = (
+    Array.isArray(existing?.checked_item_ids) ? existing.checked_item_ids : []
+  ).filter((id) => validItemIds.has(id));
+
+  let checklist;
+  if (existing) {
+    checklist = {
+      ...existing,
       kind: SEND_REVIEW_CHECKLIST_KIND,
       source: "dashboard-action",
       status: "pending",
@@ -265,72 +264,76 @@ export async function handleSendReviewChecklist(_req, res) {
       decision_options: ["Reviewed in Gmail", "Needs edits", "Hold for later"],
       grouped_count: checklistItems.length,
       updated_at: now,
-      created_at: existing?.created_at || now,
+      created_at: existing.created_at || now,
     };
+    await writeRow("followups", checklist.id, checklist);
+  } else {
+    checklist = await createRow("followups", (id) => ({
+      id,
+      kind: SEND_REVIEW_CHECKLIST_KIND,
+      source: "dashboard-action",
+      status: "pending",
+      text: sendReviewChecklistText(checklistItems.length),
+      checklist_items: checklistItems,
+      checked_item_ids: checkedItemIds,
+      decision_options: ["Reviewed in Gmail", "Needs edits", "Hold for later"],
+      grouped_count: checklistItems.length,
+      updated_at: now,
+      created_at: now,
+    }));
+  }
 
-    if (existingIdx >= 0) {
-      items[existingIdx] = checklist;
-    } else {
-      items.unshift(checklist);
-    }
-
-    const candidateIds = new Set(candidates.map((item) => item.id));
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      if (!candidateIds.has(item.id)) continue;
-      items[i] = {
-        ...item,
+  // Mark each candidate row as grouped. Parallel writes; each row's PUT is
+  // independent so they can't collide.
+  await Promise.all(
+    candidates.map((cand) =>
+      writeRow("followups", cand.id, {
+        ...cand,
         status: "grouped",
-        decision: `Grouped into ${checklistId} send-review checklist.`,
-        send_review_grouped_into: checklistId,
+        decision: `Grouped into ${checklist.id} send-review checklist.`,
+        send_review_grouped_into: checklist.id,
         grouped_at: now,
-      };
-    }
+      })
+    )
+  );
 
-    return {
-      result: {
-        ok: true,
-        grouped: candidates.length,
-        checklist,
-      },
-      items,
-    };
+  res.status(200).json({
+    ok: true,
+    grouped: candidates.length,
+    checklist,
   });
-  res.status(200).json(result);
 }
 
 export async function handleTaskRetry(id, _req, res) {
-  const result = await mutateCollection("tasks", async (items) => {
-    const idx = items.findIndex((i) => i.id === id);
-    if (idx === -1) return { skipWrite: true, result: { error: "not found", code: 404 } };
-    const cur = normalizeTask({ ...items[idx] });
-    if (cur.status !== "blocked") {
+  const result = await mutateRow("tasks", id, async (cur) => {
+    if (!cur) return { skipWrite: true, result: { error: "not found", code: 404 } };
+    const normalized = normalizeTask({ ...cur });
+    if (normalized.status !== "blocked") {
       return {
         skipWrite: true,
         result: {
-          error: `cannot retry from status=${cur.status}; only blocked -> queued allowed`,
+          error: `cannot retry from status=${normalized.status}; only blocked -> queued allowed`,
           code: 409,
         },
       };
     }
-    const retryCount = (Number(cur.retry_count) || 0) + 1;
+    const retryCount = (Number(normalized.retry_count) || 0) + 1;
     const now = new Date().toISOString();
-    const prevNote = (cur.note || "").trim();
+    const prevNote = (normalized.note || "").trim();
     const next = {
-      ...cur,
+      ...normalized,
       status: "queued",
       retry_count: retryCount,
       retried_at: now,
       assigned_next: true,
       retry_from_note: prevNote
-        ? cur.retry_from_note
-          ? `${cur.retry_from_note}\n---\nretry ${retryCount} (${now}): ${prevNote}`
+        ? normalized.retry_from_note
+          ? `${normalized.retry_from_note}\n---\nretry ${retryCount} (${now}): ${prevNote}`
           : prevNote
-        : cur.retry_from_note || null,
+        : normalized.retry_from_note || null,
       note: null,
     };
-    items[idx] = next;
-    return { result: { ticket: next, code: 200 }, items };
+    return { value: next, result: { ticket: next, code: 200 } };
   });
   if (result?.code && result.code !== 200) {
     res.status(result.code).json({ error: result.error });
@@ -340,27 +343,24 @@ export async function handleTaskRetry(id, _req, res) {
 }
 
 export async function handlePromoteSc(id, _req, res) {
-  const scs = await readCollection("suggested_changes");
-  const idx = scs.findIndex((s) => s.id === id);
-  if (idx === -1) {
+  const sc = await readRow("suggested_changes", id);
+  if (!sc) {
     res.status(404).json({ error: "not found" });
     return;
   }
-  const sc = scs[idx];
-  const tasks = await readCollection("tasks");
-  const ticket = {
-    id: nextId("t", tasks),
+  // Create the ticket via createRow so we get atomic ID assignment.
+  const ticket = await createRow("tasks", (newId) => ({
+    id: newId,
     created_at: new Date().toISOString(),
     text: sc.text || sc.title || "(no text)",
     status: "queued",
     cycle: sc.cycle,
     promoted_from: sc.id,
-  };
-  tasks.unshift(ticket);
-  scs[idx] = { ...scs[idx], status: "promoted", promoted_to: ticket.id };
-  await writeCollection("tasks", tasks);
-  await writeCollection("suggested_changes", scs);
-  res.status(200).json({ ticket, sc: scs[idx] });
+  }));
+  // Mark the SC promoted. Single-row PATCH equivalent.
+  const updatedSc = { ...sc, status: "promoted", promoted_to: ticket.id };
+  await writeRow("suggested_changes", sc.id, updatedSc);
+  res.status(200).json({ ticket, sc: updatedSc });
 }
 
 // ============================================================
@@ -406,17 +406,14 @@ export async function handleDrainRun(req, res) {
   const body = parseBody(req);
   const runtime = body?.runtime || "claude";
   const note = `cloud-mode ${runtime} request from dashboard at ${new Date().toISOString()}; run /ai-slaves locally to pick up`;
-  await mutateCollection("pending_drains", async (items) => {
-    items.unshift({
-      id: nextId("pd", items),
-      status: "pending",
-      requested_at: new Date().toISOString(),
-      note,
-      runtime,
-      source: "vercel-dashboard",
-    });
-    return { items, result: null };
-  });
+  await createRow("pending_drains", (id) => ({
+    id,
+    status: "pending",
+    requested_at: new Date().toISOString(),
+    note,
+    runtime,
+    source: "vercel-dashboard",
+  }));
   res.status(503).json({
     ok: false,
     error:

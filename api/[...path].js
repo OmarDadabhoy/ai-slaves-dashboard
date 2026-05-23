@@ -184,8 +184,8 @@ export default async function handler(req, res) {
       }
       if (req.method === "GET") {
         // Convenience: not in server.js, but useful for cloud debugging.
-        const items = await (await import("./_lib/store.js")).readCollection(name);
-        const found = items.find((x) => x.id === id);
+        const { readRow } = await import("./_lib/store.js");
+        const found = await readRow(name, id);
         if (!found) {
           res.status(404).json({ error: "not found" });
           return;
