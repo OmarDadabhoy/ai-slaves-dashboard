@@ -449,6 +449,12 @@ body {
   opacity: 1;
 }
 
+.lane-toggle-btn {
+  font-size: 10px;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
 .lane-body {
   display: flex;
   flex-direction: column;
@@ -462,6 +468,10 @@ body {
   text-align: center;
   padding: 16px 4px;
   font-style: italic;
+}
+
+.lane-body--collapsed {
+  min-height: 48px;
 }
 
 /* Ticket */
@@ -552,6 +562,91 @@ body {
 .pill--dropped { background: var(--red-soft); color: var(--red); }
 .pill--running { background: var(--purple-soft); color: var(--purple); }
 .pill--completed { background: var(--green-soft); color: var(--green); }
+.pill--fired { background: var(--purple-soft); color: var(--purple); }
+.pill--active { background: var(--green-soft); color: var(--green); }
+.pill--stale { background: var(--amber-soft); color: var(--amber); }
+.pill--missing { background: var(--gray-soft); color: var(--gray); }
+.pill--loaded { background: var(--accent-soft); color: var(--accent); }
+.pill--enabled { background: var(--green-soft); color: var(--green); }
+.pill--disabled { background: var(--gray-soft); color: var(--gray); }
+.pill--in-session { background: var(--purple-soft); color: var(--purple); }
+.pill--grouped { background: var(--accent-soft); color: var(--accent); }
+
+/* Scheduled panel: simple 6-column table layout for in-session crons +
+   remote /schedule routines. Manually populated in v1 via /api/scheduled. */
+.scheduled-table {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.scheduled-row {
+  display: grid;
+  grid-template-columns: 1.6fr 1.4fr 0.9fr 1fr 0.8fr 2.5fr;
+  gap: 12px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-surface, transparent);
+  font-size: 12.5px;
+}
+
+.scheduled-row--head {
+  background: transparent;
+  border: none;
+  padding: 4px 12px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.scheduled-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.scheduled-job-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduled-cadence {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: var(--bg-elevated, rgba(255,255,255,0.04));
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.scheduled-cadence-type {
+  font-size: 10px;
+  color: var(--text-faint);
+  margin-top: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.scheduled-desc {
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+
+@media (max-width: 900px) {
+  .scheduled-row {
+    grid-template-columns: 1fr;
+  }
+  .scheduled-row--head {
+    display: none;
+  }
+}
 
 /* Chips (metadata) */
 .chip {
@@ -654,6 +749,10 @@ body {
   opacity: 0.7;
 }
 
+.card--checklist {
+  border-left: 3px solid var(--green);
+}
+
 .card-text {
   color: var(--text);
   margin-bottom: 6px;
@@ -700,6 +799,108 @@ body {
 .card-buttons {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* t-647: inline expander shown when "Explain more" is toggled on a SC card. */
+.sc-expanded {
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  background: var(--bg-card-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.sc-expanded-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+
+.sc-expanded-body {
+  white-space: pre-wrap;
+  margin-bottom: 6px;
+}
+
+.sc-expanded-row {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+.sc-expanded-row strong {
+  color: var(--text);
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+/* t-667: Retry-all button in the blocked-lane header, matches lane-clear-btn. */
+.lane-retry-all-btn {
+  font-size: 10px;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
+.send-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.send-review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.send-review-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: var(--bg-card-2);
+}
+
+.send-review-item.is-checked {
+  opacity: 0.68;
+}
+
+.send-review-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.send-review-check input {
+  margin-top: 3px;
+  accent-color: var(--green);
+}
+
+.send-review-item-text {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.send-review-item.is-checked .send-review-item-text {
+  text-decoration: line-through;
+  color: var(--text-faint);
+}
+
+.send-review-item-meta {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin: 7px 0 0 25px;
 }
 
 .option-list {
@@ -879,10 +1080,136 @@ body {
 
 .done-row:last-child { border-bottom: none; }
 
+.done-minimized {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 6px;
+  color: var(--text-faint);
+  font-size: 12.5px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+
 .done-text {
   flex: 1;
   min-width: 0;
   color: var(--text-dim);
+}
+
+/* Scheduled runs */
+.schedule-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .schedule-layout { grid-template-columns: 1fr; }
+}
+
+.schedule-block {
+  min-width: 0;
+}
+
+.schedule-block--wide {
+  grid-column: 1 / -1;
+}
+
+.schedule-block-title {
+  font-size: 11px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.schedule-status,
+.schedule-row-meta,
+.run-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.schedule-note {
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.4;
+  margin-top: 6px;
+}
+
+.schedule-command {
+  margin-top: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-faint);
+  background: var(--bg-card);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.schedule-list,
+.run-list,
+.log-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.schedule-row,
+.run-row,
+.log-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 6px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.schedule-row:last-child,
+.run-row:last-child,
+.log-row:last-child {
+  border-bottom: none;
+}
+
+.schedule-row-body,
+.run-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.schedule-row-title,
+.run-title,
+.log-name {
+  color: var(--text);
+  font-size: 13px;
+  word-break: break-word;
+}
+
+.log-row {
+  color: var(--text-dim);
+  text-decoration: none;
+  align-items: center;
+}
+
+.log-row:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.log-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Misc */
@@ -892,6 +1219,10 @@ body {
   padding: 18px 8px;
   text-align: center;
   font-style: italic;
+}
+
+.empty--compact {
+  padding: 10px 6px;
 }
 
 .kbd {
@@ -911,4 +1242,433 @@ body {
   color: var(--text-faint);
   font-size: 12px;
   text-align: center;
+}
+
+/* ============================================================
+   Token gate (Vercel single-user auth). Renders before the app
+   loads if no DASHBOARD_TOKEN is in localStorage.
+   ============================================================ */
+.token-gate {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.token-gate-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+}
+
+.token-gate-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+
+.token-gate-sub {
+  font-size: 13px;
+  color: var(--text-faint);
+  margin-bottom: 16px;
+  line-height: 1.45;
+}
+
+.token-gate-input {
+  width: 100%;
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 11px 14px;
+  font-size: 15px;
+  font-family: inherit;
+  outline: none;
+  margin-bottom: 12px;
+  min-height: 44px;
+}
+
+.token-gate-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.token-gate-error {
+  font-size: 12px;
+  color: var(--red);
+  margin-top: 6px;
+  margin-bottom: 6px;
+}
+
+.token-gate-btn {
+  width: 100%;
+  min-height: 44px;
+}
+
+/* ============================================================
+   Mobile + tablet responsive rules.
+   Breakpoints:
+     - 1024px: laptop -> tablet (sidebars stack)
+     - 768px:  tablet -> mobile (lanes stack, actions reflow)
+     - 480px:  mobile -> small phone (denser packing, full-width buttons)
+   Tap target rule: every interactive element >= 44px tall on mobile.
+   ============================================================ */
+
+@media (max-width: 1024px) {
+  .app {
+    padding: 16px 14px 60px;
+  }
+
+  .board {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .app {
+    padding: 12px 12px 60px;
+  }
+
+  /* Topbar: brand left, stats wrap below. Keep status pill visible. */
+  .topbar {
+    margin-bottom: 12px;
+    gap: 10px;
+  }
+  .brand-title {
+    font-size: 15px;
+  }
+  .brand-tag {
+    font-size: 11px;
+  }
+  .top-stats {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .stat-num {
+    font-size: 16px;
+  }
+
+  /* Add-bar stacks. Input full width, buttons inline below. */
+  .add-bar {
+    flex-wrap: wrap;
+  }
+  .add-bar .ticket-input {
+    flex-basis: 100%;
+    min-height: 88px;
+    font-size: 16px; /* prevent iOS zoom on focus */
+  }
+  .add-bar .btn {
+    flex: 1;
+    min-height: 44px;
+  }
+
+  /* Drain bar: stack buttons + hint */
+  .drain-bar {
+    padding: 10px;
+    gap: 8px;
+  }
+  .drain-bar-left {
+    width: 100%;
+    gap: 8px;
+  }
+  .drain-bar-left .btn-drain {
+    flex: 1;
+    min-height: 44px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .drain-bar-left .btn-sm {
+    flex-basis: 100%;
+    min-height: 40px;
+  }
+  .drain-confirm,
+  .drain-hint {
+    width: 100%;
+    font-size: 12px;
+  }
+
+  /* Section header reflow: title row, then controls wrap below */
+  .section {
+    padding: 12px 12px 8px;
+    margin-bottom: 12px;
+  }
+  .section-header {
+    margin-bottom: 10px;
+    gap: 8px;
+  }
+  .controls {
+    width: 100%;
+    gap: 6px;
+  }
+  .controls .seg {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .controls .seg button {
+    flex: 1;
+    min-height: 40px;
+    padding: 8px 6px;
+    white-space: normal;
+    line-height: 1.15;
+    word-break: break-word;
+  }
+  .sort-select {
+    flex: 1;
+    min-height: 40px;
+    font-size: 13px;
+  }
+  .status-select {
+    min-height: 40px;
+    font-size: 13px;
+    padding: 8px;
+  }
+
+  /* Board: stack lanes vertically (queued -> in_progress -> blocked -> done) */
+  .board {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .lane {
+    min-height: auto;
+    padding: 10px 8px;
+  }
+  .lane-head {
+    padding: 0 2px 4px;
+  }
+
+  /* Tickets: actions wrap into tap-target-sized rows */
+  .ticket {
+    padding: 10px;
+  }
+  .ticket-body {
+    font-size: 14px;
+  }
+  .ticket-meta {
+    gap: 4px;
+  }
+  .ticket-actions {
+    gap: 6px;
+    padding-top: 8px;
+  }
+  .ticket-actions .status-select {
+    flex: 1;
+    min-width: 130px;
+  }
+  .ticket-actions .btn-xs {
+    min-height: 36px;
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  /* Grid (SCs + Follow-up): single column on mobile */
+  .grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .col {
+    gap: 0;
+  }
+
+  /* Card buttons stack full width when narrow */
+  .card {
+    padding: 10px 12px;
+  }
+  .card-footer {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .card-buttons {
+    justify-content: stretch;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .card-buttons .btn-sm {
+    flex: 1;
+    min-width: 88px;
+    min-height: 40px;
+    padding: 8px 10px;
+    font-size: 12.5px;
+  }
+
+  /* Option list: bigger tap target */
+  .option {
+    min-height: 44px;
+    padding: 10px 12px;
+    font-size: 14px;
+  }
+  .option-marker {
+    width: 14px;
+    height: 14px;
+  }
+
+  /* Send-review item: bigger checkbox, more breathing room */
+  .send-review-item {
+    padding: 10px;
+  }
+  .send-review-check {
+    gap: 10px;
+  }
+  .send-review-check input {
+    width: 18px;
+    height: 18px;
+    margin-top: 1px;
+  }
+  .send-review-item-meta {
+    margin-left: 28px;
+  }
+
+  /* Scheduled table: already single column at 900px, just ensure compact rows */
+  .scheduled-row {
+    padding: 10px;
+    font-size: 13px;
+  }
+
+  /* Schedule layout: already stacks at 900px */
+  .schedule-block-title {
+    margin-bottom: 6px;
+  }
+
+  /* Handoff list: bigger touch targets */
+  .handoff-row {
+    padding: 12px 6px;
+    min-height: 44px;
+    font-size: 14px;
+  }
+  .handoff-time {
+    font-size: 11px;
+  }
+
+  /* Done list: each row gets its own line */
+  .done-row {
+    padding: 9px 6px;
+    font-size: 13px;
+  }
+  .done-text {
+    flex-basis: 100%;
+    margin-bottom: 4px;
+  }
+
+  /* Footnote shrink */
+  .footnote {
+    font-size: 11px;
+    margin-top: 16px;
+    padding-top: 10px;
+  }
+
+  /* All buttons get 44px min tap target on mobile (excluding xs which only
+     appears on small chip-like actions inside cards, those have their own
+     min-height bumps above) */
+  .btn-sm {
+    min-height: 40px;
+    padding: 8px 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .app {
+    padding: 10px 10px 50px;
+  }
+
+  /* Topbar: brand mark + name; stats become single row, compact */
+  .brand-mark {
+    width: 26px;
+    height: 26px;
+    font-size: 12px;
+  }
+  .brand-title {
+    font-size: 14px;
+  }
+  .brand-sub {
+    display: block;
+    margin-left: 0;
+  }
+  .top-stats {
+    gap: 10px;
+  }
+  .stat {
+    padding: 0 4px;
+  }
+  .stat-num {
+    font-size: 15px;
+  }
+  .stat-lbl {
+    font-size: 9px;
+  }
+
+  /* Drain buttons: shorten label intent via CSS truncation friendly */
+  .drain-bar-left {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .drain-bar-left .btn-drain {
+    flex: none;
+    width: 100%;
+  }
+
+  /* Section spacing */
+  .section {
+    padding: 10px 10px 6px;
+  }
+  .section-title {
+    font-size: 11px;
+  }
+
+  /* Ticket: smaller meta chips, larger body */
+  .ticket {
+    padding: 9px;
+  }
+  .chip {
+    font-size: 10px;
+    padding: 3px 7px;
+  }
+
+  /* Card buttons: 2-up grid below very narrow */
+  .card-buttons .btn-sm {
+    min-width: 76px;
+    font-size: 12px;
+    padding: 8px 8px;
+  }
+
+  /* Token gate compact */
+  .token-gate {
+    padding: 16px;
+  }
+  .token-gate-card {
+    padding: 18px;
+  }
+}
+
+/* Accordion (mobile-only) collapse for the heavy panels (Suggested Changes
+   + Follow-up + Recently Done) so the page is scannable on mobile.
+   Triggered by `.section--collapsed` toggled from React state. */
+.section--collapsed .section-body {
+  display: none;
+}
+
+.section-toggle {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  min-height: 36px;
+}
+
+@media (max-width: 768px) {
+  .section-toggle {
+    min-height: 40px;
+    padding: 8px 12px;
+    font-size: 12px;
+  }
 }

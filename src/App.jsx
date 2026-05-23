@@ -2,7 +2,53 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from "react"
 
 const API = "/api";
 
+// Vercel deployment uses a shared-secret token gate. Local dev has no gate
+// (server.js doesn't enforce it). The token is stored in localStorage and
+// sent as an `x-dashboard-token` header on every API call.
+const TOKEN_STORAGE_KEY = "ai_slaves_dashboard_token";
+function getStoredToken() {
+  try {
+    return localStorage.getItem(TOKEN_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+function setStoredToken(t) {
+  try {
+    if (t) localStorage.setItem(TOKEN_STORAGE_KEY, t);
+    else localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {}
+}
+
+// Cheap mobile detector. The CSS handles >99% of the responsive work, but we
+// use this to default-collapse heavy panels (SC, Follow-up, Recently Done) on
+// mobile so the page is scannable without scroll-spamming.
+function useIsMobile(breakpoint = 768) {
+  const [isMobile, setIsMobile] = useState(
+    typeof window !== "undefined" ? window.innerWidth <= breakpoint : false
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const onResize = () => setIsMobile(window.innerWidth <= breakpoint);
+    window.addEventListener("resize", onResize);
+    onResize();
+    return () => window.removeEventListener("resize", onResize);
+  }, [breakpoint]);
+  return isMobile;
+}
+
+// Wraps fetch with the dashboard token header. Use everywhere instead of fetch.
+async function apiFetch(token, path, init = {}) {
+  const headers = new Headers(init.headers || {});
+  if (token) headers.set("x-dashboard-token", token);
+  if (init.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  return fetch(`${API}${path}`, { ...init, headers });
+}
+
 const TICKET_STATUSES = ["queued", "in_progress", "blocked", "done"];
+const SEND_REVIEW_CHECKLIST_KIND = "gmail_send_review_checklist";
 
 // Campaign color palette. Deterministic by hashing the campaign string.
 // Mixes existing accent colors with 3 added muted tones (steel, gold, plum).
@@ -54,6 +100,15 @@ function statusLabel(s) {
       dropped: "Dropped",
       running: "Running",
       completed: "Completed",
+      fired: "Fired",
+      active: "Active",
+      stale: "Stale",
+      missing: "Missing",
+      loaded: "Loaded",
+      enabled: "Enabled",
+      disabled: "Disabled",
+      "in-session": "In session",
+      grouped: "Grouped",
     }[s] || s
   );
 }
@@ -103,6 +158,62 @@ function fmtRelative(iso) {
   } catch {
     return "";
   }
+}
+
+function fmtInterval(seconds) {
+  const n = Number(seconds);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  if (n % 3600 === 0) return `${n / 3600}h`;
+  if (n % 60 === 0) return `${n / 60}m`;
+  return `${n}s`;
+}
+
+function fileName(file) {
+  if (!file) return "";
+  return String(file).split(/[\\/]/).pop();
+}
+
+function reportHref(report) {
+  const value = String(report || "").trim();
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value) || value.startsWith("/reports/")) return value;
+  return `${API}/local_report?path=${encodeURIComponent(value)}`;
+}
+
+function extractLocalReportLink(...values) {
+  for (const raw of values) {
+    const text = String(raw || "");
+    const fileUrl = text.match(/file:\/\/[^\s<>"')]+?\.html\b/i);
+    if (fileUrl) return fileUrl[0];
+
+    const localPath = text.match(/(?:^|[\s([<])((?:~?\/|state\/reports\/)[^\s<>"')]+?\.html\b)/i);
+    if (localPath) return localPath[1];
+  }
+  return null;
+}
+
+function followupText(item) {
+  return String(item?.text || item?.question || item?.title || "").trim();
+}
+
+function isSendReviewDraftFollowup(item) {
+  if (!item || item.kind === SEND_REVIEW_CHECKLIST_KIND) return false;
+  if (item.decision || item.send_review_grouped_into) return false;
+  if (["done", "decided", "dropped", "grouped"].includes(item.status)) return false;
+
+  const lower = followupText(item).toLowerCase();
+  if (!lower || !/\bdrafts?\b/.test(lower)) return false;
+  if (!/\b(send|sending|sent)\b|review\/send|review and send|before sending|drafts folder/.test(lower)) {
+    return false;
+  }
+  if (/auth login|restore .*draft|draft access|gmail filter|oauth|credential|token/.test(lower)) {
+    return false;
+  }
+
+  const gmailish = /\bgmail\b|drafts folder|\bdraft\s+r-\d+/.test(lower);
+  const followupish =
+    /follow[- ]?up|bump|warm[- ]?intro|same[- ]?thread|signup|customer|legalos|businessrocket|vector legal|deel/.test(lower);
+  return gmailish || followupish || /\bapproved\b/.test(lower);
 }
 
 // Strip the leading timestamp + trailing "-done.html" / "-needs_human.html" so the
@@ -168,25 +279,43 @@ function findMatchingHandoff(fu, doneLog) {
   return candidates[0].handoff;
 }
 
-function Section({ title, count, action, children }) {
+// Section wraps a titled panel. `collapsible` enables the mobile accordion
+// toggle: passes through an internal collapsed state controlled by a button
+// next to the title. On desktop, sections always render expanded.
+function Section({ title, count, action, children, collapsible = false, defaultCollapsed = false }) {
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
   return (
-    <section className="section">
+    <section className={`section ${collapsed ? "section--collapsed" : ""}`}>
       <div className="section-header">
         <div className="section-title">
           <span>{title}</span>
           {typeof count === "number" && <span className="count">{count}</span>}
+          {collapsible && (
+            <button
+              className="section-toggle"
+              onClick={() => setCollapsed((v) => !v)}
+              aria-expanded={!collapsed}
+              title={collapsed ? "Expand section" : "Collapse section"}
+            >
+              {collapsed ? "show" : "hide"}
+            </button>
+          )}
         </div>
         {action}
       </div>
-      {children}
+      <div className="section-body">{children}</div>
     </section>
   );
 }
 
-function TicketCard({ ticket, onMove, onDelete, onAssignNext }) {
+function TicketCard({ ticket, onMove, onDelete, onAssignNext, onRetry }) {
   const status = normalizeStatus(ticket.status);
   const body = ticket.text || ticket.title || "(untitled)";
   const color = campaignColor(ticket.campaign);
+  const handoff = ticket.handoff_path || ticket.handoff;
+  const localReport = extractLocalReportLink(body, ticket.note);
+  const handoffHref = handoff ? reportHref(handoff) : "";
+  const localReportHref = localReport ? reportHref(localReport) : "";
   // If a campaign color is set, override the left border + tint the row.
   const style = color
     ? { borderLeftColor: color.border, background: color.soft }
@@ -216,28 +345,26 @@ function TicketCard({ ticket, onMove, onDelete, onAssignNext }) {
         {ticket.created_at && <span className="chip">{fmtDate(ticket.created_at)}</span>}
         {ticket.source && <span className="chip">{ticket.source}</span>}
         {ticket.assigned_next && <span className="chip chip--accent">next drain</span>}
-        {ticket.handoff_path && (
+        {handoff && (
           <a
             className="chip chip--link"
-            href={`file://${ticket.handoff_path}`}
+            href={handoffHref}
             target="_blank"
             rel="noreferrer"
+            title={handoff}
           >
             handoff
           </a>
         )}
-        {ticket.handoff && (
+        {localReportHref && localReportHref !== handoffHref && (
           <a
             className="chip chip--link"
-            href={
-              ticket.handoff.startsWith("http")
-                ? ticket.handoff
-                : `file://${ticket.handoff}`
-            }
+            href={localReportHref}
             target="_blank"
             rel="noreferrer"
+            title={localReport}
           >
-            handoff
+            report
           </a>
         )}
       </div>
@@ -253,6 +380,15 @@ function TicketCard({ ticket, onMove, onDelete, onAssignNext }) {
             </option>
           ))}
         </select>
+        {status === "blocked" && onRetry && (
+          <button
+            className="btn btn-success btn-xs"
+            onClick={() => onRetry(ticket.id)}
+            title="Requeue this ticket with its original note and bump to head of next drain"
+          >
+            {ticket.retry_count ? `retry (${ticket.retry_count})` : "retry"}
+          </button>
+        )}
         <button
           className={`btn btn-ghost btn-xs ${ticket.assigned_next ? "is-on" : ""}`}
           onClick={() => onAssignNext(ticket.id, !ticket.assigned_next)}
@@ -272,7 +408,8 @@ function TicketCard({ ticket, onMove, onDelete, onAssignNext }) {
   );
 }
 
-function Lane({ status, tickets, onMove, onDelete, onAssignNext, headAction }) {
+function Lane({ status, tickets, onMove, onDelete, onAssignNext, onRetry, headAction, collapsed = false }) {
+  const isCollapsed = collapsed && tickets.length > 0;
   return (
     <div className="lane">
       <div className="lane-head">
@@ -282,8 +419,10 @@ function Lane({ status, tickets, onMove, onDelete, onAssignNext, headAction }) {
           {headAction}
         </div>
       </div>
-      <div className="lane-body">
-        {tickets.length === 0 ? (
+      <div className={`lane-body ${isCollapsed ? "lane-body--collapsed" : ""}`}>
+        {isCollapsed ? (
+          <div className="lane-empty">minimized, {tickets.length} hidden</div>
+        ) : tickets.length === 0 ? (
           <div className="lane-empty">empty</div>
         ) : (
           tickets.map((t) => (
@@ -293,6 +432,7 @@ function Lane({ status, tickets, onMove, onDelete, onAssignNext, headAction }) {
               onMove={onMove}
               onDelete={onDelete}
               onAssignNext={onAssignNext}
+              onRetry={onRetry}
             />
           ))
         )}
@@ -301,7 +441,126 @@ function Lane({ status, tickets, onMove, onDelete, onAssignNext, headAction }) {
   );
 }
 
+// Token gate component shown when no DASHBOARD_TOKEN is in localStorage and
+// the API is enforcing auth (Vercel mode). Local dev never sees this.
+function TokenGate({ onAuthed }) {
+  const [value, setValue] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (e) => {
+    e?.preventDefault();
+    const t = value.trim();
+    if (!t) return;
+    setBusy(true);
+    setErr("");
+    try {
+      // Probe a cheap endpoint with the candidate token. /api/health is open
+      // on local, gated on Vercel. We hit /api/tasks which is gated in both
+      // modes when auth is enabled.
+      const r = await fetch(`${API}/tasks`, {
+        headers: { "x-dashboard-token": t },
+      });
+      if (r.status === 401 || r.status === 403) {
+        setErr("Token rejected. Check your DASHBOARD_TOKEN in Vercel env vars.");
+        setBusy(false);
+        return;
+      }
+      if (!r.ok) {
+        setErr(`Unexpected status ${r.status}. Trying anyway.`);
+      }
+      setStoredToken(t);
+      onAuthed(t);
+    } catch (e2) {
+      setErr(`Network error: ${e2.message || e2}`);
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="token-gate">
+      <form className="token-gate-card" onSubmit={submit}>
+        <div className="token-gate-title">AI Slaves Dashboard</div>
+        <div className="token-gate-sub">
+          Enter your dashboard token to continue. This is the value of the
+          DASHBOARD_TOKEN env var set in Vercel.
+        </div>
+        <input
+          type="password"
+          className="token-gate-input"
+          placeholder="Paste token..."
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          autoFocus
+        />
+        {err && <div className="token-gate-error">{err}</div>}
+        <button
+          className="btn token-gate-btn"
+          type="submit"
+          disabled={busy || !value.trim()}
+        >
+          {busy ? "Checking..." : "Unlock"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 export default function App() {
+  const [token, setToken] = useState(getStoredToken());
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
+  const isMobile = useIsMobile(768);
+
+  // On mount, probe /api/tasks once. If 401/403, auth is required. If the
+  // server returns 200 with no token, local mode is fine. This avoids forcing
+  // the gate in local dev where server.js does not check tokens.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API}/tasks`, {
+          headers: token ? { "x-dashboard-token": token } : {},
+        });
+        if (cancelled) return;
+        if (r.status === 401 || r.status === 403) {
+          setAuthRequired(true);
+        } else {
+          setAuthRequired(false);
+        }
+      } catch {
+        // network error: treat as local-mode, no auth required
+        setAuthRequired(false);
+      } finally {
+        if (!cancelled) setAuthChecked(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  if (authChecked && authRequired && !token) {
+    return (
+      <TokenGate
+        onAuthed={(t) => {
+          setToken(t);
+          setAuthRequired(false);
+        }}
+      />
+    );
+  }
+  if (!authChecked) {
+    return (
+      <div className="token-gate">
+        <div className="token-gate-card">
+          <div className="token-gate-sub">Connecting...</div>
+        </div>
+      </div>
+    );
+  }
+  return <DashboardApp token={token} isMobile={isMobile} onSignOut={() => { setStoredToken(""); setToken(""); setAuthRequired(true); }} />;
+}
+
+function DashboardApp({ token, isMobile, onSignOut }) {
   const [tasks, setTasks] = useState([]);
   const [scs, setScs] = useState([]);
   const [fus, setFus] = useState([]);
@@ -309,6 +568,8 @@ export default function App() {
   const [agents, setAgents] = useState([]);
   const [pendingDrains, setPendingDrains] = useState([]);
   const [recentHandoffs, setRecentHandoffs] = useState([]);
+  const [schedulerInfo, setSchedulerInfo] = useState(null);
+  const [scheduled, setScheduled] = useState([]);
   const [newTask, setNewTask] = useState("");
   const [apiOnline, setApiOnline] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -321,6 +582,16 @@ export default function App() {
   const [copiedCmd, setCopiedCmd] = useState(false);
   const [clearMsg, setClearMsg] = useState(null);
   const [clearing, setClearing] = useState(false);
+  const [doneMinimized, setDoneMinimized] = useState(false);
+  const [sendReviewBuilding, setSendReviewBuilding] = useState(false);
+  const [sendReviewMsg, setSendReviewMsg] = useState(null);
+  // t-647: per-SC inline expander toggle (set of expanded sc ids)
+  const [expandedScIds, setExpandedScIds] = useState(() => new Set());
+  // t-647: per-SC transient confirmation after "Write spec" enqueues a ticket
+  const [scActionFlash, setScActionFlash] = useState({}); // { [sc.id]: { text, ticketId, ts } }
+  // t-667: Retry-all-blocked bulk action progress + toast
+  const [retryAllProgress, setRetryAllProgress] = useState(null); // { done, total } | null
+  const [retryAllMsg, setRetryAllMsg] = useState(null);
 
   const ticketInputRef = useRef(null);
 
@@ -338,14 +609,16 @@ export default function App() {
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [tRes, sRes, fRes, dRes, aRes, pdRes, rhRes] = await Promise.all([
-        fetch(`${API}/tasks`),
-        fetch(`${API}/suggested_changes`),
-        fetch(`${API}/followups`),
-        fetch(`${API}/done_log`),
-        fetch(`${API}/agents`),
-        fetch(`${API}/pending_drains`),
-        fetch(`${API}/recent_handoffs?limit=10`),
+      const [tRes, sRes, fRes, dRes, aRes, pdRes, rhRes, schedRes, schdRes] = await Promise.all([
+        apiFetch(token, "/tasks"),
+        apiFetch(token, "/suggested_changes"),
+        apiFetch(token, "/followups"),
+        apiFetch(token, "/done_log"),
+        apiFetch(token, "/agents"),
+        apiFetch(token, "/pending_drains"),
+        apiFetch(token, "/recent_handoffs?limit=10"),
+        apiFetch(token, "/scheduler"),
+        apiFetch(token, "/scheduled"),
       ]);
       if (tRes.ok) setTasks(await tRes.json());
       if (sRes.ok) setScs(await sRes.json());
@@ -354,22 +627,29 @@ export default function App() {
       if (aRes.ok) setAgents(await aRes.json());
       if (pdRes.ok) setPendingDrains(await pdRes.json());
       if (rhRes.ok) setRecentHandoffs(await rhRes.json());
+      if (schedRes.ok) setSchedulerInfo(await schedRes.json());
+      if (schdRes.ok) setScheduled(await schdRes.json());
       setApiOnline(true);
     } catch {
       setApiOnline(false);
+      setSchedulerInfo(null);
       try {
-        const [t, s, f, d, a] = await Promise.all([
+        const [t, s, f, d, a, pd, sch] = await Promise.all([
           fetch("/data/tasks.json").then((r) => (r.ok ? r.json() : [])),
           fetch("/data/suggested_changes.json").then((r) => (r.ok ? r.json() : [])),
           fetch("/data/followups.json").then((r) => (r.ok ? r.json() : [])),
           fetch("/data/done_log.json").then((r) => (r.ok ? r.json() : [])),
           fetch("/data/agents.json").then((r) => (r.ok ? r.json() : [])),
+          fetch("/data/pending_drains.json").then((r) => (r.ok ? r.json() : [])),
+          fetch("/data/scheduled.json").then((r) => (r.ok ? r.json() : [])),
         ]);
         setTasks(t);
         setScs(s);
         setFus(f);
         setDoneLog(d);
         setAgents(a);
+        setPendingDrains(pd);
+        setScheduled(sch);
       } catch {}
     }
     setLoading(false);
@@ -383,9 +663,8 @@ export default function App() {
 
   async function patch(path, body) {
     if (!apiOnline) return;
-    const res = await fetch(`${API}${path}`, {
+    const res = await apiFetch(token, path, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     if (res.ok) loadAll();
@@ -393,9 +672,8 @@ export default function App() {
 
   async function post(path, body) {
     if (!apiOnline) return null;
-    const res = await fetch(`${API}${path}`, {
+    const res = await apiFetch(token, path, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     if (res.ok) {
@@ -407,7 +685,7 @@ export default function App() {
 
   async function del(path) {
     if (!apiOnline) return;
-    const res = await fetch(`${API}${path}`, { method: "DELETE" });
+    const res = await apiFetch(token, path, { method: "DELETE" });
     if (res.ok) loadAll();
   }
 
@@ -456,6 +734,29 @@ export default function App() {
     del(`/tasks/${id}`);
   }
 
+  async function retryTicket(id) {
+    if (!apiOnline) {
+      // Local-only optimistic flip when API is offline.
+      setTasks((cur) =>
+        cur.map((t) =>
+          t.id === id && t.status === "blocked"
+            ? { ...t, status: "queued", assigned_next: true, retry_count: (t.retry_count || 0) + 1, retry_from_note: t.retry_from_note || t.note || null, note: null }
+            : t
+        )
+      );
+      return;
+    }
+    // Optimistic UI flip; loadAll() after the POST will reconcile with server truth.
+    setTasks((cur) =>
+      cur.map((t) =>
+        t.id === id && t.status === "blocked"
+          ? { ...t, status: "queued", assigned_next: true, retry_count: (t.retry_count || 0) + 1 }
+          : t
+      )
+    );
+    await post(`/tasks/${id}/retry`, {});
+  }
+
   async function promoteSc(id) {
     if (!apiOnline) {
       // local fallback: synthesize a ticket from the SC
@@ -475,10 +776,107 @@ export default function App() {
       setScs((cur) => cur.map((s) => (s.id === id ? { ...s, status: "promoted" } : s)));
       return;
     }
-    const res = await fetch(`${API}/suggested_changes/${id}/promote`, {
+    const res = await apiFetch(token, `/suggested_changes/${id}/promote`, {
       method: "POST",
     });
     if (res.ok) loadAll();
+  }
+
+  // t-647: "Explain more" is a pure client-side expander (no ticket created).
+  function toggleScExpanded(id) {
+    setExpandedScIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  // t-647: "Write a spec" enqueues a queued ticket asking the next drain to
+  // write a spec for this Suggested Change. After POST success, flash a
+  // confirmation on the row showing the new ticket id.
+  async function requestSpecForSc(sc) {
+    const scText = String(sc?.text || sc?.title || "").trim() || "(no suggestion text)";
+    const ticketBody = {
+      text: `Write a spec for the following Suggested Change: ${scText} (SC id: ${sc.id})`,
+      source: "sc-spec-request",
+      status: "queued",
+      suggested_change_id: sc.id,
+      cycle: sc.cycle,
+    };
+    if (!apiOnline) {
+      const localId = `t-local-${Date.now()}`;
+      setTasks((cur) => [
+        {
+          id: localId,
+          created_at: new Date().toISOString(),
+          ...ticketBody,
+        },
+        ...cur,
+      ]);
+      setScActionFlash((cur) => ({
+        ...cur,
+        [sc.id]: { text: `Spec queued (offline, ${localId})`, ticketId: localId, ts: Date.now() },
+      }));
+      setTimeout(() => {
+        setScActionFlash((cur) => {
+          const next = { ...cur };
+          delete next[sc.id];
+          return next;
+        });
+      }, 6000);
+      return;
+    }
+    const created = await post("/tasks", ticketBody);
+    const ticketId = created?.id || "queued";
+    setScActionFlash((cur) => ({
+      ...cur,
+      [sc.id]: { text: `Spec queued as ${ticketId}`, ticketId, ts: Date.now() },
+    }));
+    setTimeout(() => {
+      setScActionFlash((cur) => {
+        const next = { ...cur };
+        delete next[sc.id];
+        return next;
+      });
+    }, 6000);
+  }
+
+  // t-667: Retry every blocked ticket back to queued. Sequenced (one at a time)
+  // so we can show clear progress and avoid hammering the server.
+  async function retryAllBlocked() {
+    if (!apiOnline || retryAllProgress) return;
+    const blocked = normTasks.filter((t) => t.status === "blocked");
+    const total = blocked.length;
+    if (total === 0) return;
+    const ok = window.confirm(
+      `Move all ${total} blocked ticket${total === 1 ? "" : "s"} back to Queued?`
+    );
+    if (!ok) return;
+    setRetryAllMsg(null);
+    setRetryAllProgress({ done: 0, total });
+    let success = 0;
+    let failed = 0;
+    for (let i = 0; i < blocked.length; i++) {
+      const t = blocked[i];
+      try {
+        const r = await apiFetch(token, `/tasks/${t.id}/retry`, {
+          method: "POST",
+        });
+        if (r.ok) success++;
+        else failed++;
+      } catch {
+        failed++;
+      }
+      setRetryAllProgress({ done: i + 1, total });
+    }
+    setRetryAllProgress(null);
+    await loadAll();
+    const msg = failed === 0
+      ? `Retried ${success} ticket${success === 1 ? "" : "s"}`
+      : `Retried ${success} of ${total} (${failed} failed)`;
+    setRetryAllMsg(msg);
+    setTimeout(() => setRetryAllMsg(null), 5000);
   }
 
   function dropSc(id) {
@@ -489,6 +887,53 @@ export default function App() {
   function setFuDecision(id, decision) {
     setFus((cur) => cur.map((f) => (f.id === id ? { ...f, decision } : f)));
     patch(`/followups/${id}`, { decision });
+  }
+
+  async function buildSendReviewChecklist() {
+    if (!apiOnline || sendReviewBuilding) return;
+    setSendReviewBuilding(true);
+    setSendReviewMsg(null);
+    try {
+      const res = await apiFetch(token, `/followups/send_review_checklist`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      await loadAll();
+      if (data.grouped > 0 && data.checklist?.id) {
+        setSendReviewMsg(`Grouped ${data.grouped} into ${data.checklist.id}`);
+      } else {
+        setSendReviewMsg(data.message || "No eligible drafts");
+      }
+    } catch (err) {
+      setSendReviewMsg(`Checklist failed: ${err.message || err}`);
+    } finally {
+      setSendReviewBuilding(false);
+      setTimeout(() => setSendReviewMsg(null), 5000);
+    }
+  }
+
+  function toggleSendReviewItem(checklistId, itemId) {
+    const current = fus.find((f) => f.id === checklistId);
+    if (!current) return;
+    const checked = new Set(
+      Array.isArray(current.checked_item_ids) ? current.checked_item_ids : []
+    );
+    if (checked.has(itemId)) {
+      checked.delete(itemId);
+    } else {
+      checked.add(itemId);
+    }
+    const checkedItemIds = [...checked];
+    setFus((cur) =>
+      cur.map((f) =>
+        f.id === checklistId ? { ...f, checked_item_ids: checkedItemIds } : f
+      )
+    );
+    patch(`/followups/${checklistId}`, {
+      checked_item_ids: checkedItemIds,
+      updated_at: new Date().toISOString(),
+    });
   }
 
   async function requestDrain(runtime) {
@@ -512,9 +957,8 @@ export default function App() {
     setDrainFiring(runtime);
     // Try the direct-fire endpoint first. If it 500s, fall back to queueing.
     try {
-      const r = await fetch(`${API}/drain/run`, {
+      const r = await apiFetch(token, `/drain/run`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: "/ai-slaves", runtime }),
       });
       if (r.ok) {
@@ -568,14 +1012,12 @@ export default function App() {
     // the JSON file or get lost updates.
     try {
       await Promise.all([
-        fetch(`${API}/tasks/_bulk_delete`, {
+        apiFetch(token, `/tasks/_bulk_delete`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ids: doneTaskIds }),
         }),
-        fetch(`${API}/done_log/_bulk_delete`, {
+        apiFetch(token, `/done_log/_bulk_delete`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ids: doneLogIds }),
         }),
       ]);
@@ -645,6 +1087,39 @@ export default function App() {
     };
   }, [normTasks]);
 
+  const doneItems = useMemo(() => {
+    const doneTickets = normTasks
+      .filter((t) => t.status === "done")
+      .map((t) => ({
+        key: `task-${t.id}`,
+        id: t.id,
+        text: t.text || t.title,
+        cycle: t.cycle,
+        created_at: t.created_at,
+        handoff: t.handoff_path || t.handoff,
+        campaign: t.campaign,
+        origin: "task",
+      }));
+    const doneEntries = doneLog.map((d) => ({
+      key: `log-${d.id}`,
+      id: d.id,
+      text: d.title || d.text,
+      cycle: d.cycle,
+      created_at: d.created_at,
+      handoff: d.handoff_path || d.handoff,
+      campaign: d.campaign,
+      origin: "log",
+    }));
+
+    // Done stream sorts oldest -> newest (t-119): things done first appear first.
+    return [...doneTickets, ...doneEntries].sort(
+      (a, b) =>
+        new Date(a.created_at || 0).getTime() -
+        new Date(b.created_at || 0).getTime()
+    );
+  }, [normTasks, doneLog]);
+  const doneTotal = doneItems.length;
+
   const pendingScs = scs.filter((s) => (s.status || "pending") === "pending");
   const decidedScs = scs.filter((s) => s.status === "promoted" || s.status === "dropped");
   // Decorate each followup with a best-effort handoff link inferred from done_log
@@ -660,11 +1135,28 @@ export default function App() {
   }, [fus, doneLog]);
   const openFus = fusWithHandoff.filter((f) => !f.decision);
   const decidedFus = fusWithHandoff.filter((f) => f.decision);
+  const sendReviewDrafts = useMemo(
+    () => openFus.filter(isSendReviewDraftFollowup),
+    [openFus]
+  );
 
   const runningAgents = agents.filter((a) => (a.status || "running") === "running");
   const recentAgents = agents
     .filter((a) => a.status !== "running")
     .slice(0, 8);
+  const recentDrains = useMemo(() => {
+    return [...pendingDrains]
+      .sort(
+        (a, b) =>
+          new Date(b.requested_at || b.created_at || 0).getTime() -
+          new Date(a.requested_at || a.created_at || 0).getTime()
+      )
+      .slice(0, 8);
+  }, [pendingDrains]);
+  const launchAgents = schedulerInfo?.launch_agents || [];
+  const schedulerLogs = (schedulerInfo?.logs || []).filter((log) => log.exists);
+  const scheduleCount =
+    launchAgents.length + recentDrains.length + (schedulerInfo?.pid_file?.exists ? 1 : 0);
 
   return (
     <div className="app">
@@ -695,6 +1187,15 @@ export default function App() {
             <span className="dot"></span>
             {loading ? "syncing" : apiOnline ? "live" : "read-only"}
           </div>
+          {token && (
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={onSignOut}
+              title="Forget the saved DASHBOARD_TOKEN and lock the dashboard."
+            >
+              sign out
+            </button>
+          )}
         </div>
       </header>
 
@@ -818,18 +1319,49 @@ export default function App() {
                 onMove={moveTicket}
                 onDelete={deleteTicket}
                 onAssignNext={setAssignNext}
+                onRetry={retryTicket}
                 headAction={
                   s === "done" && lanes.done.length > 0 ? (
-                    <button
-                      className="btn btn-ghost btn-xs lane-clear-btn"
-                      onClick={clearAllDone}
-                      disabled={clearing || !apiOnline}
-                      title="Permanently delete every done ticket + done_log entry"
-                    >
-                      {clearing ? "..." : "clear"}
-                    </button>
+                    <>
+                      <button
+                        className={`btn btn-ghost btn-xs lane-toggle-btn ${
+                          doneMinimized ? "is-on" : ""
+                        }`}
+                        onClick={() => setDoneMinimized((v) => !v)}
+                        title={doneMinimized ? "Show done entries" : "Minimize done entries"}
+                      >
+                        {doneMinimized ? "show" : "hide"}
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-xs lane-clear-btn"
+                        onClick={clearAllDone}
+                        disabled={clearing || !apiOnline}
+                        title="Permanently delete every done ticket + done_log entry"
+                      >
+                        {clearing ? "..." : "clear"}
+                      </button>
+                    </>
+                  ) : s === "blocked" && lanes.blocked.length > 0 ? (
+                    <>
+                      {retryAllMsg && (
+                        <span className="clear-toast" title="Retry all blocked result">
+                          {retryAllMsg}
+                        </span>
+                      )}
+                      <button
+                        className="btn btn-success btn-xs lane-retry-all-btn"
+                        onClick={retryAllBlocked}
+                        disabled={!apiOnline || !!retryAllProgress}
+                        title="Flip every blocked ticket back to Queued so the next drain picks them up"
+                      >
+                        {retryAllProgress
+                          ? `Retrying ${retryAllProgress.done}/${retryAllProgress.total}...`
+                          : `Retry all (${lanes.blocked.length})`}
+                      </button>
+                    </>
                   ) : null
                 }
+                collapsed={s === "done" && doneMinimized}
               />
             ))}
           </div>
@@ -845,6 +1377,7 @@ export default function App() {
                   onMove={moveTicket}
                   onDelete={deleteTicket}
                   onAssignNext={setAssignNext}
+                  onRetry={retryTicket}
                 />
               ))
             )}
@@ -854,43 +1387,88 @@ export default function App() {
 
       <div className="grid">
         <div className="col">
-          <Section title="Suggested Changes" count={pendingScs.length}>
+          <Section title="Suggested Changes" count={pendingScs.length} collapsible defaultCollapsed={isMobile}>
             {pendingScs.length === 0 ? (
               <div className="empty">No pending suggestions.</div>
             ) : (
               <ul className="card-list">
-                {pendingScs.map((s) => (
-                  <li key={s.id} className="card">
-                    <div className="card-text">{s.text}</div>
-                    {s.revenue_mechanism && (
-                      <div className="card-revenue">
-                        <strong>Revenue</strong>
-                        {s.revenue_mechanism}
+                {pendingScs.map((s) => {
+                  const isExpanded = expandedScIds.has(s.id);
+                  const flash = scActionFlash[s.id];
+                  return (
+                    <li key={s.id} className="card">
+                      <div className="card-text">{s.text}</div>
+                      {isExpanded && (
+                        <div className="sc-expanded">
+                          <div className="sc-expanded-label">Full text</div>
+                          <div className="sc-expanded-body">{s.text}</div>
+                          {s.revenue_mechanism && (
+                            <div className="sc-expanded-row">
+                              <strong>Revenue:</strong> {s.revenue_mechanism}
+                            </div>
+                          )}
+                          {s.source_task_id && (
+                            <div className="sc-expanded-row">
+                              <strong>Source task:</strong> {s.source_task_id}
+                            </div>
+                          )}
+                          {s.created_at && (
+                            <div className="sc-expanded-row">
+                              <strong>Created:</strong> {fmtDate(s.created_at)} {fmtTime(s.created_at)}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {s.revenue_mechanism && (
+                        <div className="card-revenue">
+                          <strong>Revenue</strong>
+                          {s.revenue_mechanism}
+                        </div>
+                      )}
+                      <div className="card-footer">
+                        <div className="card-meta">
+                          {s.cycle != null && <span className="chip">cycle {s.cycle}</span>}
+                          <span className="chip">{s.id}</span>
+                          {flash && (
+                            <span className="clear-toast" title="Spec ticket queued">
+                              {flash.text}
+                            </span>
+                          )}
+                        </div>
+                        <div className="card-buttons">
+                          <button
+                            className={`btn btn-ghost btn-sm ${isExpanded ? "is-on" : ""}`}
+                            onClick={() => toggleScExpanded(s.id)}
+                            title="Show or hide the full Suggested Change details"
+                          >
+                            {isExpanded ? "Show less" : "Explain more"}
+                          </button>
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => requestSpecForSc(s)}
+                            title="Queue a ticket asking the next drain to write a spec for this SC"
+                            disabled={!!flash}
+                          >
+                            {flash ? "Queued" : "Write a spec"}
+                          </button>
+                          <button
+                            className="btn btn-success btn-sm"
+                            onClick={() => promoteSc(s.id)}
+                            title="Create a queued ticket from this SC"
+                          >
+                            Promote to ticket
+                          </button>
+                          <button
+                            className="btn btn-danger btn-sm"
+                            onClick={() => dropSc(s.id)}
+                          >
+                            Drop
+                          </button>
+                        </div>
                       </div>
-                    )}
-                    <div className="card-footer">
-                      <div className="card-meta">
-                        {s.cycle != null && <span className="chip">cycle {s.cycle}</span>}
-                        <span className="chip">{s.id}</span>
-                      </div>
-                      <div className="card-buttons">
-                        <button
-                          className="btn btn-success btn-sm"
-                          onClick={() => promoteSc(s.id)}
-                          title="Create a queued ticket from this SC"
-                        >
-                          Promote to ticket
-                        </button>
-                        <button
-                          className="btn btn-danger btn-sm"
-                          onClick={() => dropSc(s.id)}
-                        >
-                          Drop
-                        </button>
-                      </div>
-                    </div>
-                  </li>
-                ))}
+                    </li>
+                  );
+                })}
               </ul>
             )}
             {decidedScs.length > 0 && (
@@ -914,51 +1492,161 @@ export default function App() {
             )}
           </Section>
 
-          <Section title="Follow-up" count={openFus.length}>
+          <Section
+            title="Follow-up"
+            count={openFus.length}
+            collapsible
+            defaultCollapsed={isMobile}
+            action={
+              <div className="send-review-actions">
+                {sendReviewMsg && <span className="clear-toast">{sendReviewMsg}</span>}
+                <button
+                  className="btn btn-success btn-sm"
+                  onClick={buildSendReviewChecklist}
+                  disabled={!apiOnline || sendReviewBuilding || sendReviewDrafts.length === 0}
+                  title="Group eligible Gmail draft follow-ups into one review checklist. This does not send email."
+                >
+                  {sendReviewBuilding
+                    ? "Grouping..."
+                    : `Build send-review checklist (${sendReviewDrafts.length})`}
+                </button>
+              </div>
+            }
+          >
             {openFus.length === 0 ? (
               <div className="empty">No open decisions.</div>
             ) : (
               <ul className="card-list">
-                {openFus.map((f) => (
-                  <li key={f.id} className="card">
-                    <div className="card-text">{f.text || f.question || f.title}</div>
-                    <ul className="option-list">
-                      {(f.decision_options || f.options || []).map((opt) => (
-                        <li
-                          key={opt}
-                          className={`option ${f.decision === opt ? "selected" : ""}`}
-                          onClick={() => setFuDecision(f.id, opt)}
-                        >
-                          <span className="option-marker"></span>
-                          <span>{opt}</span>
-                        </li>
-                      ))}
-                    </ul>
-                    <div className="card-meta">
-                      {f.cycle != null && (
-                        <span className="chip">cycle {f.cycle}</span>
+                {openFus.map((f) => {
+                  const isSendReviewChecklist =
+                    f.kind === SEND_REVIEW_CHECKLIST_KIND;
+                  const checklistItems = Array.isArray(f.checklist_items)
+                    ? f.checklist_items
+                    : [];
+                  const checkedIds = new Set(
+                    Array.isArray(f.checked_item_ids) ? f.checked_item_ids : []
+                  );
+                  const checkedCount = checklistItems.filter((item) =>
+                    checkedIds.has(item.followup_id || item.id)
+                  ).length;
+                  return (
+                    <li
+                      key={f.id}
+                      className={`card ${isSendReviewChecklist ? "card--checklist" : ""}`}
+                    >
+                      <div className="card-text">{f.text || f.question || f.title}</div>
+                      {isSendReviewChecklist ? (
+                        <div className="send-review-list">
+                          {checklistItems.length === 0 ? (
+                            <div className="empty empty--compact">
+                              No drafts in this checklist yet.
+                            </div>
+                          ) : (
+                            checklistItems.map((item) => {
+                              const itemId = item.followup_id || item.id;
+                              const isChecked = checkedIds.has(itemId);
+                              return (
+                                <div
+                                  key={itemId}
+                                  className={`send-review-item ${
+                                    isChecked ? "is-checked" : ""
+                                  }`}
+                                >
+                                  <label className="send-review-check">
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={() =>
+                                        toggleSendReviewItem(f.id, itemId)
+                                      }
+                                    />
+                                    <span className="send-review-item-text">
+                                      {item.text}
+                                    </span>
+                                  </label>
+                                  <div className="send-review-item-meta">
+                                    <span className="chip">{itemId}</span>
+                                    {item.draft_id && (
+                                      <span className="chip">{item.draft_id}</span>
+                                    )}
+                                    {item.subject && (
+                                      <span className="chip" title={item.subject}>
+                                        {item.subject}
+                                      </span>
+                                    )}
+                                    {item.cycle != null && (
+                                      <span className="chip">cycle {item.cycle}</span>
+                                    )}
+                                    {item.handoff && (
+                                      <a
+                                        className="chip chip--link"
+                                        href={reportHref(item.handoff)}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        title={item.handoff}
+                                      >
+                                        handoff
+                                      </a>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      ) : (
+                        <ul className="option-list">
+                          {(f.decision_options || f.options || []).map((opt) => (
+                            <li
+                              key={opt}
+                              className={`option ${f.decision === opt ? "selected" : ""}`}
+                              onClick={() => setFuDecision(f.id, opt)}
+                            >
+                              <span className="option-marker"></span>
+                              <span>{opt}</span>
+                            </li>
+                          ))}
+                        </ul>
                       )}
-                      <span className="chip">{f.id}</span>
-                      {f._matched_handoff && (
-                        <a
-                          className="chip chip--link"
-                          href={
-                            f._matched_handoff.startsWith("http")
-                              ? f._matched_handoff
-                              : `/reports/${encodeURIComponent(
-                                  f._matched_handoff.split("/").pop()
-                                )}`
-                          }
-                          target="_blank"
-                          rel="noreferrer"
-                          title={f._matched_handoff}
-                        >
-                          view handoff
-                        </a>
+                      {isSendReviewChecklist && (
+                        <ul className="option-list">
+                          {(f.decision_options || f.options || []).map((opt) => (
+                            <li
+                              key={opt}
+                              className={`option ${f.decision === opt ? "selected" : ""}`}
+                              onClick={() => setFuDecision(f.id, opt)}
+                            >
+                              <span className="option-marker"></span>
+                              <span>{opt}</span>
+                            </li>
+                          ))}
+                        </ul>
                       )}
-                    </div>
-                  </li>
-                ))}
+                      <div className="card-meta">
+                        {isSendReviewChecklist && (
+                          <span className="chip chip--accent">
+                            {checkedCount}/{checklistItems.length} checked
+                          </span>
+                        )}
+                        {f.cycle != null && (
+                          <span className="chip">cycle {f.cycle}</span>
+                        )}
+                        <span className="chip">{f.id}</span>
+                        {f._matched_handoff && (
+                          <a
+                            className="chip chip--link"
+                            href={reportHref(f._matched_handoff)}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={f._matched_handoff}
+                          >
+                            view handoff
+                          </a>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             )}
             {decidedFus.length > 0 && (
@@ -974,13 +1662,7 @@ export default function App() {
                         {f._matched_handoff && (
                           <a
                             className="chip chip--link"
-                            href={
-                              f._matched_handoff.startsWith("http")
-                                ? f._matched_handoff
-                                : `/reports/${encodeURIComponent(
-                                    f._matched_handoff.split("/").pop()
-                                  )}`
-                            }
+                            href={reportHref(f._matched_handoff)}
                             target="_blank"
                             rel="noreferrer"
                             title={f._matched_handoff}
@@ -1001,6 +1683,8 @@ export default function App() {
           <Section
             title="Recently Created HTMLs"
             count={recentHandoffs.length}
+            collapsible
+            defaultCollapsed={isMobile}
             action={
               <span className="done-order-hint">newest -&gt; oldest</span>
             }
@@ -1028,7 +1712,7 @@ export default function App() {
             )}
           </Section>
 
-          <Section title="Agents" count={runningAgents.length}>
+          <Section title="Agents" count={runningAgents.length} collapsible defaultCollapsed={isMobile}>
             {agents.length === 0 ? (
               <div className="empty">
                 No agents reporting in yet. The orchestrator will write here once cycle 16 lands.
@@ -1091,23 +1775,29 @@ export default function App() {
 
           <Section
             title="Recently Done"
-            count={normTasks.filter((t) => t.status === "done").length + doneLog.length}
+            count={doneTotal}
+            collapsible
+            defaultCollapsed={isMobile}
             action={
               <div className="done-actions">
                 {clearMsg && (
                   <span className="clear-toast">{clearMsg}</span>
                 )}
-                <span className="done-order-hint">oldest -&gt; newest</span>
+                <span className="done-order-hint">
+                  {doneMinimized ? "minimized" : "oldest -&gt; newest"}
+                </span>
+                <button
+                  className={`btn btn-ghost btn-sm ${doneMinimized ? "is-on" : ""}`}
+                  onClick={() => setDoneMinimized((v) => !v)}
+                  disabled={doneTotal === 0}
+                  title={doneMinimized ? "Show done entries" : "Minimize done entries"}
+                >
+                  {doneMinimized ? "Show done" : "Minimize"}
+                </button>
                 <button
                   className="btn btn-danger btn-sm"
                   onClick={clearAllDone}
-                  disabled={
-                    clearing ||
-                    !apiOnline ||
-                    normTasks.filter((t) => t.status === "done").length +
-                      doneLog.length ===
-                      0
-                  }
+                  disabled={clearing || !apiOnline || doneTotal === 0}
                   title="Permanently delete every done ticket + done_log entry"
                 >
                   {clearing ? "Clearing..." : "Clear all done"}
@@ -1115,91 +1805,268 @@ export default function App() {
               </div>
             }
           >
-            {(() => {
-              // Merge done tasks + done_log entries into a single chronological stream,
-              // sorted ASC by created_at so "stuff done first" appears at the top (t-119).
-              const doneTickets = normTasks
-                .filter((t) => t.status === "done")
-                .map((t) => ({
-                  key: `task-${t.id}`,
-                  id: t.id,
-                  text: t.text || t.title,
-                  cycle: t.cycle,
-                  created_at: t.created_at,
-                  handoff: t.handoff_path || t.handoff,
-                  campaign: t.campaign,
-                  origin: "task",
-                }));
-              const doneEntries = doneLog.map((d) => ({
-                key: `log-${d.id}`,
-                id: d.id,
-                text: d.title || d.text,
-                cycle: d.cycle,
-                created_at: d.created_at,
-                handoff: d.handoff_path || d.handoff,
-                campaign: d.campaign,
-                origin: "log",
-              }));
-              const merged = [...doneTickets, ...doneEntries].sort(
-                (a, b) =>
-                  new Date(a.created_at || 0).getTime() -
-                  new Date(b.created_at || 0).getTime()
-              );
-              if (merged.length === 0) {
-                return <div className="empty">Nothing closed yet.</div>;
-              }
+            {doneItems.length === 0 ? (
+              <div className="empty">Nothing closed yet.</div>
+            ) : doneMinimized ? (
+              <div className="done-minimized">
+                <span className="pill pill--done">done</span>
+                <span>{doneTotal} done entries hidden.</span>
+              </div>
+            ) : (
+              <div className="done-list">
+                {doneItems.map((d) => {
+                  const color = campaignColor(d.campaign);
+                  const rowStyle = color
+                    ? { borderLeft: `3px solid ${color.border}`, background: color.soft, paddingLeft: 8 }
+                    : undefined;
+                  return (
+                    <div key={d.key} className="done-row" style={rowStyle}>
+                      <span className="pill pill--done">done</span>
+                      <span className="done-text">{d.text}</span>
+                      {d.campaign && (
+                        <span
+                          className="chip chip--campaign"
+                          style={{
+                            color: color?.text,
+                            borderColor: color?.border,
+                            background: color?.soft,
+                          }}
+                        >
+                          {d.campaign}
+                        </span>
+                      )}
+                      {d.cycle != null && (
+                        <span className="chip">cycle {d.cycle}</span>
+                      )}
+                      {d.created_at && (
+                        <span className="chip">{fmtDate(d.created_at)}</span>
+                      )}
+                      {d.handoff && (
+                        <a
+                          className="chip chip--link"
+                          href={reportHref(d.handoff)}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={d.handoff}
+                        >
+                          handoff
+                        </a>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Section>
+        </div>
+      </div>
+
+      <Section
+        title="Scheduled"
+        count={scheduled.length}
+        collapsible
+        defaultCollapsed={isMobile}
+        action={
+          <span className="done-order-hint">in-session crons + remote routines</span>
+        }
+      >
+        {scheduled.length === 0 ? (
+          <div className="empty">
+            No scheduled entries. Register one with{" "}
+            <span className="kbd">
+              curl -X POST http://127.0.0.1:5176/api/scheduled -H 'Content-Type: application/json' -d '{`{`}...{`}`}'
+            </span>
+          </div>
+        ) : (
+          <div className="scheduled-table">
+            <div className="scheduled-row scheduled-row--head">
+              <div>Name</div>
+              <div>Cadence</div>
+              <div>Next run</div>
+              <div>Source</div>
+              <div>Status</div>
+              <div>Description</div>
+            </div>
+            {scheduled.map((s) => {
+              const status = s.status || "enabled";
               return (
-                <div className="done-list">
-                  {merged.map((d) => {
-                    const color = campaignColor(d.campaign);
-                    const rowStyle = color
-                      ? { borderLeft: `3px solid ${color.border}`, background: color.soft, paddingLeft: 8 }
-                      : undefined;
+                <div key={s.id} className="scheduled-row">
+                  <div className="scheduled-name">
+                    {s.name || "(unnamed)"}
+                    {s.job_id && (
+                      <div className="scheduled-job-id" title={s.job_id}>
+                        {s.job_id}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <code className="scheduled-cadence">{s.cadence || ""}</code>
+                    {s.cadence_type && (
+                      <div className="scheduled-cadence-type">{s.cadence_type}</div>
+                    )}
+                  </div>
+                  <div>{s.next_run ? fmtRelative(s.next_run) : <span className="text-faint">recurring</span>}</div>
+                  <div>{s.source || ""}</div>
+                  <div>
+                    <span className={`pill pill--${status}`}>{statusLabel(status)}</span>
+                  </div>
+                  <div className="scheduled-desc">{s.description || ""}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Scheduled Runs" count={scheduleCount} collapsible defaultCollapsed={isMobile}>
+        {!schedulerInfo ? (
+          <div className="empty">
+            Scheduler details need the API server. Recent pending drains still load from local JSON when available.
+          </div>
+        ) : (
+          <div className="schedule-layout">
+            <div className="schedule-block">
+              <div className="schedule-block-title">Scheduler status</div>
+              <div className="schedule-status">
+                <span className={`pill pill--${schedulerInfo.pid_file?.status || "missing"}`}>
+                  {statusLabel(schedulerInfo.pid_file?.status || "missing")}
+                </span>
+                {schedulerInfo.pid_file?.pid && (
+                  <span className="chip">pid {schedulerInfo.pid_file.pid}</span>
+                )}
+                {schedulerInfo.pid_file?.relative_path && (
+                  <span className="chip" title={schedulerInfo.pid_file.path}>
+                    {schedulerInfo.pid_file.relative_path}
+                  </span>
+                )}
+                {schedulerInfo.pid_file?.process?.interval_seconds && (
+                  <span className="chip">
+                    loop {fmtInterval(schedulerInfo.pid_file.process.interval_seconds)}
+                    {schedulerInfo.pid_file.process.jitter_seconds
+                      ? ` +${fmtInterval(schedulerInfo.pid_file.process.jitter_seconds)} jitter`
+                      : ""}
+                  </span>
+                )}
+              </div>
+              <div className="schedule-note">{schedulerInfo.schedule_model?.detail}</div>
+              {schedulerInfo.pid_file?.process?.started_at_text && (
+                <div className="schedule-note">
+                  Process started {schedulerInfo.pid_file.process.started_at_text}
+                </div>
+              )}
+              {schedulerInfo.pid_file?.process?.command && (
+                <div className="schedule-command" title={schedulerInfo.pid_file.process.command}>
+                  {schedulerInfo.pid_file.process.command}
+                </div>
+              )}
+            </div>
+
+            <div className="schedule-block">
+              <div className="schedule-block-title">Launch schedules</div>
+              {launchAgents.length === 0 ? (
+                <div className="empty empty--compact">No launchd schedule plist found.</div>
+              ) : (
+                <div className="schedule-list">
+                  {launchAgents.map((agent) => {
+                    const state = agent.launchctl?.state || (agent.launchctl?.loaded ? "loaded" : "missing");
+                    const stateClass = state === "running" ? "running" : agent.launchctl?.loaded ? "loaded" : "missing";
+                    const interval = agent.start_interval_seconds || agent.launchctl?.run_interval_seconds;
                     return (
-                      <div key={d.key} className="done-row" style={rowStyle}>
-                        <span className="pill pill--done">done</span>
-                        <span className="done-text">{d.text}</span>
-                        {d.campaign && (
-                          <span
-                            className="chip chip--campaign"
-                            style={{
-                              color: color?.text,
-                              borderColor: color?.border,
-                              background: color?.soft,
-                            }}
-                          >
-                            {d.campaign}
-                          </span>
-                        )}
-                        {d.cycle != null && (
-                          <span className="chip">cycle {d.cycle}</span>
-                        )}
-                        {d.created_at && (
-                          <span className="chip">{fmtDate(d.created_at)}</span>
-                        )}
-                        {d.handoff && (
-                          <a
-                            className="chip chip--link"
-                            href={
-                              d.handoff.startsWith("http")
-                                ? d.handoff
-                                : `file://${d.handoff}`
-                            }
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            handoff
-                          </a>
-                        )}
+                      <div key={agent.label} className="schedule-row">
+                        <span className={`pill pill--${stateClass}`}>
+                          {state === "not running" ? "Idle" : statusLabel(state)}
+                        </span>
+                        <div className="schedule-row-body">
+                          <div className="schedule-row-title">{agent.label}</div>
+                          <div className="schedule-row-meta">
+                            {interval && <span className="chip">every {fmtInterval(interval)}</span>}
+                            {agent.launchctl?.runs != null && (
+                              <span className="chip">{agent.launchctl.runs} runs</span>
+                            )}
+                            {agent.launchctl?.last_exit_code != null && (
+                              <span className="chip">last exit {agent.launchctl.last_exit_code}</span>
+                            )}
+                            <span className="chip" title={agent.path}>
+                              {fileName(agent.path)}
+                            </span>
+                          </div>
+                        </div>
                       </div>
                     );
                   })}
                 </div>
-              );
-            })()}
-          </Section>
-        </div>
-      </div>
+              )}
+            </div>
+
+            <div className="schedule-block schedule-block--wide">
+              <div className="schedule-block-title">Recent drain requests</div>
+              {recentDrains.length === 0 ? (
+                <div className="empty empty--compact">No pending_drains entries yet.</div>
+              ) : (
+                <div className="run-list">
+                  {recentDrains.map((drain) => {
+                    const status = drain.status || "pending";
+                    return (
+                      <div key={drain.id} className="run-row">
+                        <span className={`pill pill--${status}`}>{statusLabel(status)}</span>
+                        <div className="run-body">
+                          <div className="run-title">
+                            {drain.runtime || "drain"}
+                            {drain.mode ? `, ${drain.mode}` : ""}
+                          </div>
+                          <div className="run-meta">
+                            {drain.requested_at && (
+                              <span className="chip">{fmtRelative(drain.requested_at)}</span>
+                            )}
+                            {drain.pid && <span className="chip">pid {drain.pid}</span>}
+                            <span className="chip">{drain.id}</span>
+                            {drain.log_path && (
+                              <a
+                                className="chip chip--link"
+                                href={`file://${drain.log_path}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                title={drain.log_path}
+                              >
+                                {fileName(drain.log_path)}
+                              </a>
+                            )}
+                          </div>
+                          {drain.note && <div className="schedule-note">{drain.note}</div>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="schedule-block schedule-block--wide">
+              <div className="schedule-block-title">Scheduler logs</div>
+              {schedulerLogs.length === 0 ? (
+                <div className="empty empty--compact">No scheduler log files found.</div>
+              ) : (
+                <div className="log-list">
+                  {schedulerLogs.map((log) => (
+                    <a
+                      key={log.path}
+                      className="log-row"
+                      href={`file://${log.path}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={log.path}
+                    >
+                      <span className="log-name">{log.relative_path || fileName(log.path)}</span>
+                      <span className="chip">{log.size || 0} bytes</span>
+                      {log.mtime_iso && <span className="chip">{fmtRelative(log.mtime_iso)}</span>}
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </Section>
 
       <div className="footnote">
         Data lives at <span className="kbd">~/Desktop/Ai-slaves-dashboard/data/</span>. The /ai-slaves

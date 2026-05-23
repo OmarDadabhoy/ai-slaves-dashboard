@@ -1,0 +1,12 @@
+data/
+data_backup/
+logs/
+.dev.pid
+.scheduler.pid
+.playwright-cli/
+server.js
+scripts/start.sh
+scripts/stop.sh
+scripts/verify-concurrent-posts.mjs
+node_modules/
+dist/
