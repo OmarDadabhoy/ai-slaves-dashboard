@@ -3,7 +3,11 @@ dist/
 data/
 logs/
 .dev.pid
+.scheduler.pid
+.playwright-cli/
 .DS_Store
 .vite/
 
 data_backup/
+.vercel
+.env*.local
