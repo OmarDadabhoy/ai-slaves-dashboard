@@ -573,6 +573,11 @@ function DashboardApp({ token, isMobile, onSignOut }) {
   const [newTask, setNewTask] = useState("");
   const [apiOnline, setApiOnline] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Generation counter: every loadAll bumps it. If results come back stale
+  // (a newer loadAll has been issued since), drop them. Prevents an older
+  // in-flight refresh from overwriting fresh state after a mutation, which
+  // was causing ticket disappear/reappear flicker.
+  const loadAllGen = useRef(0);
   const [filter, setFilter] = useState("all"); // all | mine | next-drain
   const [sortBy, setSortBy] = useState("created"); // created | cycle | status
   const [view, setView] = useState("board"); // board | list
@@ -607,6 +612,7 @@ function DashboardApp({ token, isMobile, onSignOut }) {
   }, [newTask]);
 
   const loadAll = useCallback(async () => {
+    const gen = ++loadAllGen.current;
     setLoading(true);
     // Use allSettled so a single fetch failure (network blip, CDN flake)
     // does NOT wipe the entire UI to empty arrays. Per-endpoint guard:
@@ -623,6 +629,10 @@ function DashboardApp({ token, isMobile, onSignOut }) {
       apiFetch(token, "/scheduler"),
       apiFetch(token, "/scheduled"),
     ]);
+    // Drop stale results: if a newer loadAll has been issued, our data
+    // is older than what's already onscreen. Applying it would revert
+    // the UI (= the disappear/reappear flicker users were seeing).
+    if (gen !== loadAllGen.current) return;
     const [tRes, sRes, fRes, dRes, aRes, pdRes, rhRes, schedRes, schdRes] = results;
     const okOrNull = async (settled) => {
       if (settled.status !== "fulfilled") return null;
@@ -679,6 +689,7 @@ function DashboardApp({ token, isMobile, onSignOut }) {
             try { return await s.value.json(); } catch { return null; }
           };
           const [t, s, f, d, a, pd, sch] = await Promise.all(fb.map(fbJson));
+          if (gen !== loadAllGen.current) return;
           if (t !== null) setTasks(t);
           if (s !== null) setScs(s);
           if (f !== null) setFus(f);
@@ -689,7 +700,7 @@ function DashboardApp({ token, isMobile, onSignOut }) {
         } catch {}
       }
     }
-    setLoading(false);
+    if (gen === loadAllGen.current) setLoading(false);
   }, [token]);
 
   useEffect(() => {
