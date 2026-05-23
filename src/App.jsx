@@ -608,52 +608,89 @@ function DashboardApp({ token, isMobile, onSignOut }) {
 
   const loadAll = useCallback(async () => {
     setLoading(true);
-    try {
-      const [tRes, sRes, fRes, dRes, aRes, pdRes, rhRes, schedRes, schdRes] = await Promise.all([
-        apiFetch(token, "/tasks"),
-        apiFetch(token, "/suggested_changes"),
-        apiFetch(token, "/followups"),
-        apiFetch(token, "/done_log"),
-        apiFetch(token, "/agents"),
-        apiFetch(token, "/pending_drains"),
-        apiFetch(token, "/recent_handoffs?limit=10"),
-        apiFetch(token, "/scheduler"),
-        apiFetch(token, "/scheduled"),
-      ]);
-      if (tRes.ok) setTasks(await tRes.json());
-      if (sRes.ok) setScs(await sRes.json());
-      if (fRes.ok) setFus(await fRes.json());
-      if (dRes.ok) setDoneLog(await dRes.json());
-      if (aRes.ok) setAgents(await aRes.json());
-      if (pdRes.ok) setPendingDrains(await pdRes.json());
-      if (rhRes.ok) setRecentHandoffs(await rhRes.json());
-      if (schedRes.ok) setSchedulerInfo(await schedRes.json());
-      if (schdRes.ok) setScheduled(await schdRes.json());
+    // Use allSettled so a single fetch failure (network blip, CDN flake)
+    // does NOT wipe the entire UI to empty arrays. Per-endpoint guard:
+    // we only update state when that specific endpoint returned ok + data.
+    // Previous state is preserved on failure so the dashboard stays visible.
+    const results = await Promise.allSettled([
+      apiFetch(token, "/tasks"),
+      apiFetch(token, "/suggested_changes"),
+      apiFetch(token, "/followups"),
+      apiFetch(token, "/done_log"),
+      apiFetch(token, "/agents"),
+      apiFetch(token, "/pending_drains"),
+      apiFetch(token, "/recent_handoffs?limit=10"),
+      apiFetch(token, "/scheduler"),
+      apiFetch(token, "/scheduled"),
+    ]);
+    const [tRes, sRes, fRes, dRes, aRes, pdRes, rhRes, schedRes, schdRes] = results;
+    const okOrNull = async (settled) => {
+      if (settled.status !== "fulfilled") return null;
+      const r = settled.value;
+      if (!r || !r.ok) return null;
+      try { return await r.json(); } catch { return null; }
+    };
+    const tJ = await okOrNull(tRes);
+    if (tJ !== null) setTasks(tJ);
+    const sJ = await okOrNull(sRes);
+    if (sJ !== null) setScs(sJ);
+    const fJ = await okOrNull(fRes);
+    if (fJ !== null) setFus(fJ);
+    const dJ = await okOrNull(dRes);
+    if (dJ !== null) setDoneLog(dJ);
+    const aJ = await okOrNull(aRes);
+    if (aJ !== null) setAgents(aJ);
+    const pdJ = await okOrNull(pdRes);
+    if (pdJ !== null) setPendingDrains(pdJ);
+    const rhJ = await okOrNull(rhRes);
+    if (rhJ !== null) setRecentHandoffs(rhJ);
+    const schedJ = await okOrNull(schedRes);
+    if (schedJ !== null) setSchedulerInfo(schedJ);
+    const schdJ = await okOrNull(schdRes);
+    if (schdJ !== null) setScheduled(schdJ);
+
+    // Health: api is online if at least one of the core endpoints (tasks)
+    // resolved. Otherwise show read-only banner BUT keep existing state.
+    const anyOk = [tRes, sRes, fRes, dRes, aRes].some(
+      (r) => r.status === "fulfilled" && r.value && r.value.ok
+    );
+    if (anyOk) {
       setApiOnline(true);
-    } catch {
+    } else {
       setApiOnline(false);
-      setSchedulerInfo(null);
-      try {
-        const [t, s, f, d, a, pd, sch] = await Promise.all([
-          fetch("/data/tasks.json").then((r) => (r.ok ? r.json() : [])),
-          fetch("/data/suggested_changes.json").then((r) => (r.ok ? r.json() : [])),
-          fetch("/data/followups.json").then((r) => (r.ok ? r.json() : [])),
-          fetch("/data/done_log.json").then((r) => (r.ok ? r.json() : [])),
-          fetch("/data/agents.json").then((r) => (r.ok ? r.json() : [])),
-          fetch("/data/pending_drains.json").then((r) => (r.ok ? r.json() : [])),
-          fetch("/data/scheduled.json").then((r) => (r.ok ? r.json() : [])),
-        ]);
-        setTasks(t);
-        setScs(s);
-        setFus(f);
-        setDoneLog(d);
-        setAgents(a);
-        setPendingDrains(pd);
-        setScheduled(sch);
-      } catch {}
+      // Only fall back to local /data/*.json on local dev (server.js serves
+      // them). On Vercel those paths 404 and reading would wipe state to [].
+      // Detect by hostname: only attempt fallback if not on *.vercel.app.
+      const isLocal = typeof window !== "undefined" &&
+        !/\.vercel\.app$/i.test(window.location.hostname);
+      if (isLocal) {
+        try {
+          const fb = await Promise.allSettled([
+            fetch("/data/tasks.json"),
+            fetch("/data/suggested_changes.json"),
+            fetch("/data/followups.json"),
+            fetch("/data/done_log.json"),
+            fetch("/data/agents.json"),
+            fetch("/data/pending_drains.json"),
+            fetch("/data/scheduled.json"),
+          ]);
+          const fbJson = async (s) => {
+            if (s.status !== "fulfilled" || !s.value.ok) return null;
+            try { return await s.value.json(); } catch { return null; }
+          };
+          const [t, s, f, d, a, pd, sch] = await Promise.all(fb.map(fbJson));
+          if (t !== null) setTasks(t);
+          if (s !== null) setScs(s);
+          if (f !== null) setFus(f);
+          if (d !== null) setDoneLog(d);
+          if (a !== null) setAgents(a);
+          if (pd !== null) setPendingDrains(pd);
+          if (sch !== null) setScheduled(sch);
+        } catch {}
+      }
     }
     setLoading(false);
-  }, []);
+  }, [token]);
 
   useEffect(() => {
     loadAll();
