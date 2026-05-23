@@ -646,9 +646,13 @@ function DashboardApp({ token, isMobile, onSignOut }) {
     autoResizeTextarea();
   }, [newTask]);
 
-  const loadAll = useCallback(async () => {
+  const loadAll = useCallback(async ({ silent = true } = {}) => {
     const gen = ++loadAllGen.current;
-    setLoading(true);
+    // Only flip the visible "syncing" pill on EXPLICIT refreshes (the manual
+    // refresh button). Background 5s polls run silently so the header status
+    // doesn't toggle live -> syncing -> live every 5 seconds, which Omar saw
+    // as small flicker in his peripheral vision.
+    if (!silent) setLoading(true);
     // Use allSettled so a single fetch failure (network blip, CDN flake)
     // does NOT wipe the entire UI to empty arrays. Per-endpoint guard:
     // we only update state when that specific endpoint returned ok + data.
@@ -745,12 +749,17 @@ function DashboardApp({ token, isMobile, onSignOut }) {
         } catch {}
       }
     }
-    if (gen === loadAllGen.current) setLoading(false);
+    // Only flip loading=false if WE set loading=true (i.e. non-silent call).
+    // Silent polls never touch loading, so we don't need to clear it.
+    if (gen === loadAllGen.current && !silent) setLoading(false);
   }, [token]);
 
   useEffect(() => {
-    loadAll();
-    const id = setInterval(loadAll, 5000); // soft refresh so orchestrator writes appear live
+    // Initial mount: show "syncing" pill briefly so the user knows we're
+    // fetching. Subsequent polls and post-mutation reconciles run silent
+    // so the header status stays steady at "live" - no flicker.
+    loadAll({ silent: false });
+    const id = setInterval(() => loadAll({ silent: true }), 5000);
     return () => clearInterval(id);
   }, [loadAll]);
 
@@ -1335,7 +1344,7 @@ function DashboardApp({ token, isMobile, onSignOut }) {
         <button className="btn" onClick={addTicket} disabled={!newTask.trim()}>
           Add ticket
         </button>
-        <button className="btn btn-ghost" onClick={loadAll} title="Force refresh (auto-refreshes every 5s)">
+        <button className="btn btn-ghost" onClick={() => loadAll({ silent: false })} title="Force refresh (auto-refreshes every 5s)">
           Refresh
         </button>
       </div>
