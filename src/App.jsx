@@ -82,7 +82,9 @@ function campaignColor(campaign) {
 // Falls back to plain text if no prefix.
 function parseCampaignPrefix(raw) {
   const trimmed = (raw || "").trim();
-  const m = trimmed.match(/^campaign:(\S+)\s+(.+)$/i);
+  // [\s\S]+ (not .+) so the body keeps every line; a bare . would stop at the
+  // first newline and silently drop the rest of a multi-line ticket.
+  const m = trimmed.match(/^campaign:(\S+)\s+([\s\S]+)$/i);
   if (!m) return { campaign: null, text: trimmed };
   return { campaign: m[1], text: m[2].trim() };
 }
